@@ -1,0 +1,394 @@
+---
+title: "isoscape"
+format: html
+editor: visual
+---
+
+```{r}
+library(stars)
+library(tidyverse)
+library(sf)
+library(readxl)
+```
+```{r}
+list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
+  rast() |>
+  plot()
+
+list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
+  rast() |>
+  plot()
+```
+
+```{r}
+vars1 <- list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
+  read_stars() %>%
+    setNames(., str_remove(names(.), '_reproj.tif'))
+
+vars2 <- list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[-c(3:4, 6:9, 11:12, 21:22)] |>
+  read_stars()  %>%
+  setNames(., str_remove(names(.), '_reproj.tif'))
+
+vars3 <- list.files('data/isotope_predictors', pattern = '\\.tif$', full.names = TRUE) %>%
+  str_subset('reproj', negate = TRUE) %>%
+  .[c(1:2, 32:34, 39)] %>%
+  .[c(1:2, 4:5)] |>
+  read_stars() %>%
+  setNames(., str_remove(names(.), '.tif'))
+
+vars4 <- list.files('data/isotope_predictors', pattern = '^r.', full.names = TRUE) %>%
+  .[-c(26, 28:32)] |>
+  read_stars() %>%
+  setNames(., str_remove(names(.), '.tif'))
+
+vars5 <- c(vars2, vars4)
+
+vars1 |> dim()
+vars2 |> dim()
+vars3 |> dim()
+vars4 |> dim()
+
+names(vars5)
+plot(vars5[19,,,])
+```
+
+```{r}
+plot(vars4)
+
+list(vars1, vars2, vars3, vars4) |>
+  map(st_crs)
+
+c(vars2, vars4)
+```
+
+
+```{r}
+plot(vars1)
+vars2
+```
+
+```{r}
+pts <- read_excel('1-s2.0-S0031018220302947-mmc1.xlsx', sheet = 2, guess_max = 100000) |>
+  mutate(sr = as.numeric(str_replace(`87Sr/86Sr`, ',', '.'))) |>
+  select(sr, Longitude, Latitude, type = `Type 1`) |> # keep Type 1 and 2 and Material?
+  remove_missing() |>
+  st_as_sf(coords = c('Longitude', 'Latitude'), crs = 4326)
+
+unique(pts$type)
+plot(pts)
+unique(pts$`Type 2`)
+ggplot(pts) +
+  geom_sf(aes(color = type))
+```
+
+```{r}
+vars_dat1 <- pts |>
+  st_transform(st_crs(vars1)) %>%
+  st_extract(vars1, .) |>
+  st_drop_geometry()
+
+vars_dat2 <- pts |>
+  st_transform(st_crs(vars5)) %>%
+  st_extract(vars5, .) |>
+  st_drop_geometry()
+
+vars_dat3 <- pts |>
+  st_transform(st_crs(vars3)) %>%
+  st_extract(vars3, .) |>
+  st_drop_geometry()
+
+dat <- bind_cols(vars_dat1, vars_dat2, vars_dat3) %>%
+  mutate(lc = factor(lc),
+         sr = pts$sr,
+         type = factor(pts$type)) |>
+  select(-magt, -perma) |>
+  filter(sr <= 0.8) |>
+  remove_missing()
+
+names(dat)
+```
+
+## Exploratory Analysis
+
+```{r}
+raw_dat<- read_excel('1-s2.0-S0031018220302947-mmc1.xlsx', sheet = 2, guess_max = 100000) |>
+  mutate(sr = parse_number(str_replace(`87Sr/86Sr`, ',', '.')),
+         sr2 = as.numeric(str_replace(`87Sr/86Sr`, ',', '.'))) 
+raw_dat |>
+  ggplot(aes(sr, sr2)) +
+  geom_point()
+  filter(is.na(sr))
+  ggplot(aes)
+```
+
+```{r}
+raw_dat |>
+  filter(sr > 0.8)
+raw_dat |>
+  ggplot(aes(Country, sr)) +
+  geom_boxplot()
+```
+
+## Modeling
+
+```{r}
+library(tidymodels)
+library(future)
+library(bonsai)
+
+plan(multisession, workers = 20)
+
+folds <- vfold_cv(dat, v = 5)
+rf_mod <- rand_forest(mode = 'regression', 
+                      mtry = tune(), 
+                      min_n = tune()) |>
+  set_engine('ranger', importance = 'permutation')
+
+
+rf_base_fit <- fit(rf_base, )
+
+boost_mod <- boost_tree(mode = 'regression', 
+                        mtry = tune(), 
+                        trees = tune(), 
+                        tree_depth = tune(), 
+                       # learn_rate = tune(), 
+                        loss_reduction = tune(),#range = c(-10, -4)), 
+                        min_n = tune()) |>
+  set_engine('lightgbm', importance = 'permutation', num_leaves = tune())
+
+#bart_mod <- bart(mode = 'regression', 
+#             trees = tune(),
+#             prior_terminal_node_coef = tune(),
+#             prior_terminal_node_expo = tune(),
+#             prior_outcome_range = tune())
+  
+rf_wflw <- workflow(sr ~ ., spec = rf_mod)
+boost_wflw <- workflow(sr ~ ., spec = boost_mod)
+#bart_wflw <- workflow(sr ~ ., spec = bart_mod)
+
+control <- control_grid(save_pred = TRUE)
+resamp <- tune_grid(rf_wflw, folds, grid = 30, control = control)
+resamp_boost <- tune_grid(boost_wflw, folds, grid = 50, control = control)
+#resamp_bart <- tune_grid(bart_wflw, folds, grid = 30, control = control)
+```
+
+```{r}
+autoplot(resamp)
+```
+
+```{r}
+autoplot(resamp_boost)
+```
+
+```{r}
+autoplot(resamp_bart)
+```
+
+```{r}
+show_best(resamp)
+show_best(resamp_boost)
+#show_best(resamp_bart)
+
+select_best(resamp)
+select_best(resamp_boost)
+#select_best(resamp_bart)
+```
+
+```{r}
+collect_predictions(resamp) %>%
+  ggplot(aes(sr, .pred)) +
+  geom_point(aes(color = id, alpha = 0.1)) +
+  geom_abline() +
+  coord_equal()
+collect_predictions(resamp_boost) %>%
+  ggplot(aes(sr, .pred)) +
+  geom_point(aes(color = id, alpha = 0.1)) +
+  geom_abline() +
+  coord_equal()
+#collect_predictions(resamp_bart) %>%
+#  ggplot(aes(sr, .pred)) +
+#  geom_point(aes(color = id)) +
+#  geom_abline() +
+#  coord_equal()
+```
+
+```{r}
+final_fit <- resamp_boost %>%
+  select_best(metric = 'rmse') %>%
+  finalize_workflow(boost_wflw, .) %>%
+  fit(dat)
+
+
+base_fit <- rand_forest(mode = 'regression') |>
+  set_engine('ranger', importance = 'permutation') |>
+  fit(sr ~ ., data = dat)
+```
+
+```{r}
+library(vip)
+
+vip(extract_fit_engine(final_fit), num_features = 23)
+vip(extract_fit_engine(base_fit), num_features = 23)
+
+```
+
+```{r}
+mexico_bbox <- st_bbox(c(xmin = -114, xmax = -55, ymin = 0, ymax = 36), crs = 4326) |>
+  st_as_sfc() |>
+ st_transform(st_crs(vars2))
+library(terra)
+
+oaxaca_bbox <- st_bbox(c(xmin = -106, xmax = -92, ymin = 12, ymax = 24), crs = 4326) |>
+  st_as_sfc() |>
+  st_transform(st_crs(vars5)) |>
+  st_bbox()
+
+mex_rast <- vars1 |>
+  st_set_crs(st_crs(vars5)) |>
+  c(vars5) |>
+  st_crop(oaxaca_bbox) |>
+  st_as_stars()
+
+test <- vars3 |>
+  st_warp(vars5) 
+
+
+mex_rast <- c(mex_rast, st_crop(test, oaxaca_bbox)) |>
+  mutate(lc = factor(lc),
+         type = 'Mammal') 
+
+mex_rast2 <- rast(mex_rast)
+names(mex_rast2) <- names(mex_rast)
+plot(mex_rast2)
+
+mex_preds <- predict(mex_rast2, extract_fit_parsnip(final_fit), na.rm = TRUE)#, cores = 20
+
+plot(mex_preds)
+```
+
+
+```{r}
+iso <- read_csv('OAX_Sr_Data.csv') %>%
+  st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
+  st_transform(st_crs(mex_preds))
+```
+
+```{r}
+plot(iso)
+
+extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point() +
+  geom_abline()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = Branch)) +
+  geom_abline()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  names()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = Site)) +
+  geom_abline()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = Locality)) +
+  geom_abline()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = Elevation)) +
+  geom_abline()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = RootingDepth)) +
+  geom_abline()
+```
+
+```{r}
+terra::extract(mex_preds, iso, bind=T) |>
+  as.data.frame() |>
+  ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = Species)) +
+  geom_abline()
+```
+
+```{r}
+files <- read_csv('~/Downloads/atm_list.txt', col_names = FALSE) |>
+  mutate(destfile = str_split(X1, '/'),
+         destfile = map_chr(destfile, ~.x[[9]]))
+  
+walk2(files$X1, files$destfile, ~download.file(.x, .y))
+
+
+test <- read_ncdf('B.E.13.B1850C5.ne120_t12.sehires38.003.sunway_02.cam.h0.TREFHT.002101-002912.nc', var = 'TREFHT',  make_time = FALSE)
+
+test <- terra::rast('B.E.13.B1850C5.ne120_t12.sehires38.003.sunway_02.cam.h0.TREFHT.002101-002912.nc')
+
+plot(test)
+
+library(tidync)
+
+test <- tidync('B.E.13.B1850C5.ne120_t12.sehires38.003.sunway_02.cam.h0.TREFHT.002101-002912.nc')
+
+test
+```
+
+```{r}
+library(sf)
+test |> activate('D3') |> 
+  hyper_tibble() |>
+  st_as_sf(coords = c('lon', 'lat')) |>
+  select(area) |>
+  plot()
+```
+
+```{r}
+test <- read_ncdf('~/Downloads/tas_EUR-11_ECMWF-ERAINT_evaluation_r1i1p1_CLMcom-CCLM4-8-17_v1_mon_199101-200012.nc', curvilinear = c('lon', 'lat'))
+library(tidyEOF)
+
+test2 <- get_anomalies(test, scale = TRUE, monthly = TRUE)
+rast(test)
+library(scico)
+ggplot() +
+  geom_stars( data = test2[,,,1:12]) +
+  facet_wrap(~time) +
+  scale_fill_scico(palette = 'vik', midpoint = 0)
+```
+
+```{r}
+test3 <- read_ncdf('~/Dropbox (UFL)/CanRCM4-EU_Cordex/tas_EUR-22_CCCma-CanESM2_historical_r1i1p1_CCCma-CanRCM4_r2_mon_199101-200012.nc')
+library(tidyEOF)
+
+test4 <- get_anomalies(test3, scale = TRUE, monthly = TRUE)
+
+library(scico)
+ggplot() +
+  geom_stars( data = test4[,,,1:12]) +
+  facet_wrap(~time) +
+  scale_fill_scico(palette = 'vik', midpoint = 0)
+```
