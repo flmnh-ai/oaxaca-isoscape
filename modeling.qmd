@@ -1,160 +1,173 @@
 ---
-title: "isoscape"
+title: "Oaxaca Isoscape"
 format: html
 editor: visual
 ---
 
+## Setup
+
+Load required packages.
+
 ```{r}
 library(stars)
-library(tidyverse)
 library(sf)
+library(tidyverse)
 library(readxl)
-```
-```{r}
-list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
-  rast() |>
-  plot()
+library(rnaturalearth)
 
-list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
-  rast() |>
-  plot()
+library(tidymodels)
+library(spatialsample)
+library(future)
+library(bonsai)
+library(vip)
+
+plan(multisession) # use all available cores for parallel processing
 ```
 
+### Preprocess Global Raster Predictors
+
+extents are the same, but its the resolution that doesn't match
+
+vars 2 and 3 are multi resolution? its from lc and age_min. or all the age_min/max srsq layers in vars3? but they all read as having the same resolution when checking dimensions
+
+looks like everything but vars3 is the same projection, just not necessarily named that? and why does vars3 then need to be reprojected? ah its listed as world eckertIV rather than just eckert IV
+
 ```{r}
-vars1 <- list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
+vars1 <- list.files('data/data-raw/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
   read_stars() %>%
     setNames(., str_remove(names(.), '_reproj.tif'))
 
-vars2 <- list.files('data/isotope_predictors', pattern = 'reproj', full.names = TRUE)[-c(3:4, 6:9, 11:12, 21:22)] |>
-  read_stars()  %>%
-  setNames(., str_remove(names(.), '_reproj.tif'))
+eck4 <- st_crs(vars1)
 
-vars3 <- list.files('data/isotope_predictors', pattern = '\\.tif$', full.names = TRUE) %>%
+vars2 <- list.files('data/data-raw/isotope_predictors', pattern = 'reproj', full.names = TRUE)[-c(3:4, 6:9, 11:12, 21:22)] %>%
+  .[-5] |> # remove lc for now to test resolution issue
+  read_stars()  %>%
+  setNames(., str_remove(names(.), '_reproj.tif')) |>
+  select(-lc) |>
+  st_set_crs(eck4)
+
+vars3 <- list.files('data/data-raw/isotope_predictors', pattern = '\\.tif$', full.names = TRUE) %>%
   str_subset('reproj', negate = TRUE) %>%
   .[c(1:2, 32:34, 39)] %>%
-  .[c(1:2, 4:5)] |>
+    .[c(1:2, 4:5)] |>
   read_stars() %>%
-  setNames(., str_remove(names(.), '.tif'))
+  setNames(., str_remove(names(.), '.tif')) |>
+  st_set_crs(eck4)
 
-vars4 <- list.files('data/isotope_predictors', pattern = '^r.', full.names = TRUE) %>%
+vars4 <- list.files('data/data-raw/isotope_predictors', pattern = '^r.', full.names = TRUE) %>%
   .[-c(26, 28:32)] |>
   read_stars() %>%
-  setNames(., str_remove(names(.), '.tif'))
+  setNames(., str_remove(names(.), '.tif')) |>
+  st_set_crs(eck4)
 
-vars5 <- c(vars2, vars4)
-
-vars1 |> dim()
-vars2 |> dim()
-vars3 |> dim()
-vars4 |> dim()
-
-names(vars5)
-plot(vars5[19,,,])
-```
-
-```{r}
-plot(vars4)
-
-list(vars1, vars2, vars3, vars4) |>
-  map(st_crs)
-
-c(vars2, vars4)
+predictors <- c(vars1, vars2, vars3, vars4) |>
+  select(-magt, -perma) # incomplete variables? # also, this doesn't seem to remove them?
 ```
 
 
 ```{r}
-plot(vars1)
-vars2
+oaxaca_bbox <- st_bbox(c(xmin = -106, xmax = -92, ymin = 12, ymax = 24), crs = 4326) |>
+  st_transform(eck4) 
+
+world <- ne_countries() |>
+  st_transform(eck4)
+
+oaxaca_preds <- st_crop(c(vars1, vars2, vars4), oaxaca_bbox) |>
+  st_as_stars() |>
+  c(st_as_stars(st_crop(vars3, oaxaca_bbox))) |>
+  select(-magt, -perma) # incomplete variables?
 ```
 
 ```{r}
-pts <- read_excel('1-s2.0-S0031018220302947-mmc1.xlsx', sheet = 2, guess_max = 100000) |>
-  mutate(sr = as.numeric(str_replace(`87Sr/86Sr`, ',', '.'))) |>
+plot(merge(oaxaca_preds), join_zlim = TRUE)
+```
+
+### Preprocess Global Isotope Observations
+
+```{r}
+pts <- read_excel('data/data-raw/1-s2.0-S0031018220302947-mmc1.xlsx', sheet = 2, guess_max = 100000) |>
+  mutate(sr = str_replace(`87Sr/86Sr`, ',', '.'),
+         sr = parse_number(sr)) |>
+  filter(sr <= 0.75) |> # confirm with sofia or look at types more critically
   select(sr, Longitude, Latitude, type = `Type 1`) |> # keep Type 1 and 2 and Material?
-  remove_missing() |>
-  st_as_sf(coords = c('Longitude', 'Latitude'), crs = 4326)
+  mutate(type = if_else(type == 'water', 'Water', type),
+         type = if_else(type == 'mammal', 'Mammal', type)) |>
+  filter(type %in% c('Plant', 'Mammal', 'Water', 'Invertebrates', 'Minerals', 'Rock')) |>
+  remove_missing() |> # some rows don't have Sr measurements
+  st_as_sf(coords = c('Longitude', 'Latitude'), crs = 4326) |>
+  st_transform(eck4)
+```
 
-unique(pts$type)
-plot(pts)
-unique(pts$`Type 2`)
+```{r}
 ggplot(pts) +
-  geom_sf(aes(color = type))
+  geom_sf(data = st_as_sfc(world), color = 'lightgrey') + # so type doesn't get invovled
+  geom_sf(aes(color = type), alpha = 0.5, size = .1) +
+  theme_bw() +
+  facet_wrap(~type)
+```
+```{r}
+ggplot(pts) +
+  geom_bar(aes(type)) +
+  theme_bw() +
+  coord_flip()
 ```
 
 ```{r}
-vars_dat1 <- pts |>
-  st_transform(st_crs(vars1)) %>%
-  st_extract(vars1, .) |>
-  st_drop_geometry()
+ggplot(pts) +
+  geom_histogram(aes(sr)) +
+  theme_bw()
 
-vars_dat2 <- pts |>
-  st_transform(st_crs(vars5)) %>%
-  st_extract(vars5, .) |>
-  st_drop_geometry()
+pts |>
+  arrange(sr) |>
+ggplot() +
+  geom_sf(data = world, color = 'lightgrey') +
+  geom_sf(aes(color = sr), size = 0.1) +
+  scale_color_viridis_c() +
+  theme_bw()
+```
 
-vars_dat3 <- pts |>
-  st_transform(st_crs(vars3)) %>%
-  st_extract(vars3, .) |>
-  st_drop_geometry()
+### Final Data for Modeling
 
-dat <- bind_cols(vars_dat1, vars_dat2, vars_dat3) %>%
-  mutate(lc = factor(lc),
-         sr = pts$sr,
+```{r}
+dat <- predictors |>
+  st_extract(pts) |>
+  mutate(sr = pts$sr,
          type = factor(pts$type)) |>
-  select(-magt, -perma) |>
-  filter(sr <= 0.8) |>
-  remove_missing()
-
-names(dat)
+  select(-magt, -perma) |> # because not removed from rasters
+  remove_missing() # only necessary for rf
 ```
 
-## Exploratory Analysis
-
-```{r}
-raw_dat<- read_excel('1-s2.0-S0031018220302947-mmc1.xlsx', sheet = 2, guess_max = 100000) |>
-  mutate(sr = parse_number(str_replace(`87Sr/86Sr`, ',', '.')),
-         sr2 = as.numeric(str_replace(`87Sr/86Sr`, ',', '.'))) 
-raw_dat |>
-  ggplot(aes(sr, sr2)) +
-  geom_point()
-  filter(is.na(sr))
-  ggplot(aes)
-```
-
-```{r}
-raw_dat |>
-  filter(sr > 0.8)
-raw_dat |>
-  ggplot(aes(Country, sr)) +
-  geom_boxplot()
-```
 
 ## Modeling
 
 ```{r}
-library(tidymodels)
-library(future)
-library(bonsai)
-
-plan(multisession, workers = 20)
-
+set.seed(1111)
+#folds <- spatial_clustering_cv(dat, v = 8)
+#folds <- spatial_block_cv(dat)
 folds <- vfold_cv(dat, v = 5)
-rf_mod <- rand_forest(mode = 'regression', 
-                      mtry = tune(), 
+#autoplot(folds)
+```
+
+```{r}
+rf_mod <- rand_forest(mode = 'regression',
+                      mtry = tune(),
                       min_n = tune()) |>
   set_engine('ranger', importance = 'permutation')
 
-
-rf_base_fit <- fit(rf_base, )
+rec <- recipe(sr ~ ., dat) |>
+  update_role(c(type, geometry), new_role = 'other') |>
+  update_role_requirements('other', bake = FALSE)
 
 boost_mod <- boost_tree(mode = 'regression', 
                         mtry = tune(), 
                         trees = tune(), 
                         tree_depth = tune(), 
-                       # learn_rate = tune(), 
-                        loss_reduction = tune(),#range = c(-10, -4)), 
+                        learn_rate = tune(), 
+                        loss_reduction = tune(), 
                         min_n = tune()) |>
-  set_engine('lightgbm', importance = 'permutation', num_leaves = tune())
+  set_engine('lightgbm', 
+             importance = 'permutation', 
+             num_leaves = tune())
 
 #bart_mod <- bart(mode = 'regression', 
 #             trees = tune(),
@@ -162,18 +175,34 @@ boost_mod <- boost_tree(mode = 'regression',
 #             prior_terminal_node_expo = tune(),
 #             prior_outcome_range = tune())
   
-rf_wflw <- workflow(sr ~ ., spec = rf_mod)
-boost_wflw <- workflow(sr ~ ., spec = boost_mod)
+rf_wflw <- workflow(rec, spec = rf_mod)
+boost_wflw <- workflow(rec, spec = boost_mod) 
+
 #bart_wflw <- workflow(sr ~ ., spec = bart_mod)
 
-control <- control_grid(save_pred = TRUE)
-resamp <- tune_grid(rf_wflw, folds, grid = 30, control = control)
-resamp_boost <- tune_grid(boost_wflw, folds, grid = 50, control = control)
+rf_params <- extract_parameter_set_dials(rf_wflw) |>
+  update(mtry = mtry(range = c(1, 20)))
+
+boost_params <- extract_parameter_set_dials(boost_wflw) |>
+  update(loss_reduction = loss_reduction(range = c(-10, -4)),
+         learn_rate = learn_rate(range = c(-4, -1)))
+
+control <- control_grid(save_pred = TRUE, pkgs = 'sf') # needed for parallel processing when geometry columns present
+
+resamp_rf <- tune_grid(rf_wflw, folds, 
+                       grid = 40, 
+                       param_info = rf_params,
+                       control = control)
+
+resamp_boost <- tune_grid(boost_wflw, folds, 
+                          grid = 80, 
+                          param_info = boost_params, 
+                          control = control)
 #resamp_bart <- tune_grid(bart_wflw, folds, grid = 30, control = control)
 ```
 
 ```{r}
-autoplot(resamp)
+autoplot(resamp_rf)
 ```
 
 ```{r}
@@ -195,88 +224,68 @@ select_best(resamp_boost)
 ```
 
 ```{r}
-collect_predictions(resamp) %>%
-  ggplot(aes(sr, .pred)) +
-  geom_point(aes(color = id, alpha = 0.1)) +
-  geom_abline() +
-  coord_equal()
-collect_predictions(resamp_boost) %>%
-  ggplot(aes(sr, .pred)) +
-  geom_point(aes(color = id, alpha = 0.1)) +
-  geom_abline() +
-  coord_equal()
-#collect_predictions(resamp_bart) %>%
-#  ggplot(aes(sr, .pred)) +
-#  geom_point(aes(color = id)) +
-#  geom_abline() +
-#  coord_equal()
-```
-
-```{r}
 final_fit <- resamp_boost %>%
   select_best(metric = 'rmse') %>%
   finalize_workflow(boost_wflw, .) %>%
-  fit(dat)
+  fit(dat) 
 
-
-base_fit <- rand_forest(mode = 'regression') |>
-  set_engine('ranger', importance = 'permutation') |>
-  fit(sr ~ ., data = dat)
+base_fit <- resamp_rf %>%
+  select_best(metric = 'rmse') %>%
+  finalize_workflow(rf_wflw, .) %>%
+  fit(dat) 
 ```
 
 ```{r}
-library(vip)
+vip(extract_fit_engine(final_fit), num_features = 60)
+vip(extract_fit_engine(base_fit), num_features = 60)
+```
+```{r}
+augment(final_fit, dat) %>%
+  ggplot(aes(sr, .pred)) +
+  geom_point(aes(color = type), size = 0.2, alpha = 0.5) +
+  geom_abline() +
+  coord_equal() +
+  theme_bw()
 
-vip(extract_fit_engine(final_fit), num_features = 23)
-vip(extract_fit_engine(base_fit), num_features = 23)
+augment(base_fit, dat) %>%
+  ggplot(aes(sr, .pred)) +
+  geom_point(aes(color = type), size = 0.2, alpha = 0.5) +
+  geom_abline() +
+  coord_equal() +
+  theme_bw()
+```
+# Oaxa predictions
 
+```{r}
+mex_preds <- predict(oaxaca_preds, 
+                     extract_fit_parsnip(final_fit), 
+                     na.rm = TRUE)
 ```
 
 ```{r}
-mexico_bbox <- st_bbox(c(xmin = -114, xmax = -55, ymin = 0, ymax = 36), crs = 4326) |>
-  st_as_sfc() |>
- st_transform(st_crs(vars2))
-library(terra)
+#library(terra)
+mex_preds <- oaxaca_preds |>
+  terra::rast() |>
+  setNames(names(oaxaca_preds)) |>
+  terra::predict(extract_fit_parsnip(base_fit), na.rm = TRUE)
+  #terra::predict(extract_fit_parsnip(final_fit), na.rm = TRUE)
 
-oaxaca_bbox <- st_bbox(c(xmin = -106, xmax = -92, ymin = 12, ymax = 24), crs = 4326) |>
-  st_as_sfc() |>
-  st_transform(st_crs(vars5)) |>
-  st_bbox()
-
-mex_rast <- vars1 |>
-  st_set_crs(st_crs(vars5)) |>
-  c(vars5) |>
-  st_crop(oaxaca_bbox) |>
-  st_as_stars()
-
-test <- vars3 |>
-  st_warp(vars5) 
-
-
-mex_rast <- c(mex_rast, st_crop(test, oaxaca_bbox)) |>
-  mutate(lc = factor(lc),
-         type = 'Mammal') 
-
-mex_rast2 <- rast(mex_rast)
-names(mex_rast2) <- names(mex_rast)
-plot(mex_rast2)
-
-mex_preds <- predict(mex_rast2, extract_fit_parsnip(final_fit), na.rm = TRUE)#, cores = 20
-
-plot(mex_preds)
+terra::plot(mex_preds)
+#oaxaca_predictions <- predict(oaxaca_preds, extract_fit_parsnip(final_fit), na.rm = TRUE)
 ```
 
-
 ```{r}
-iso <- read_csv('OAX_Sr_Data.csv') %>%
+iso <- read_excel('data/data-raw/OAX Sr Result Table.xlsx') %>%
   st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
   st_transform(st_crs(mex_preds))
 ```
 
 ```{r}
 plot(iso)
+```
 
-extract(mex_preds, iso, bind=T) |>
+```{r}
+terra::extract(mex_preds, iso, bind = TRUE) |>
   as.data.frame() |>
   ggplot(aes(Sr, .pred)) +
   geom_point() +
@@ -294,20 +303,6 @@ terra::extract(mex_preds, iso, bind=T) |>
 ```{r}
 terra::extract(mex_preds, iso, bind=T) |>
   as.data.frame() |>
-  names()
-```
-
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point(aes(color = Site)) +
-  geom_abline()
-```
-
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
   ggplot(aes(Sr, .pred)) +
   geom_point(aes(color = Locality)) +
   geom_abline()
@@ -317,15 +312,7 @@ terra::extract(mex_preds, iso, bind=T) |>
 terra::extract(mex_preds, iso, bind=T) |>
   as.data.frame() |>
   ggplot(aes(Sr, .pred)) +
-  geom_point(aes(color = Elevation)) +
-  geom_abline()
-```
-
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point(aes(color = RootingDepth)) +
+  geom_point(aes(color = `Plant Rooting Depth`)) +
   geom_abline()
 ```
 
@@ -335,60 +322,4 @@ terra::extract(mex_preds, iso, bind=T) |>
   ggplot(aes(Sr, .pred)) +
   geom_point(aes(color = Species)) +
   geom_abline()
-```
-
-```{r}
-files <- read_csv('~/Downloads/atm_list.txt', col_names = FALSE) |>
-  mutate(destfile = str_split(X1, '/'),
-         destfile = map_chr(destfile, ~.x[[9]]))
-  
-walk2(files$X1, files$destfile, ~download.file(.x, .y))
-
-
-test <- read_ncdf('B.E.13.B1850C5.ne120_t12.sehires38.003.sunway_02.cam.h0.TREFHT.002101-002912.nc', var = 'TREFHT',  make_time = FALSE)
-
-test <- terra::rast('B.E.13.B1850C5.ne120_t12.sehires38.003.sunway_02.cam.h0.TREFHT.002101-002912.nc')
-
-plot(test)
-
-library(tidync)
-
-test <- tidync('B.E.13.B1850C5.ne120_t12.sehires38.003.sunway_02.cam.h0.TREFHT.002101-002912.nc')
-
-test
-```
-
-```{r}
-library(sf)
-test |> activate('D3') |> 
-  hyper_tibble() |>
-  st_as_sf(coords = c('lon', 'lat')) |>
-  select(area) |>
-  plot()
-```
-
-```{r}
-test <- read_ncdf('~/Downloads/tas_EUR-11_ECMWF-ERAINT_evaluation_r1i1p1_CLMcom-CCLM4-8-17_v1_mon_199101-200012.nc', curvilinear = c('lon', 'lat'))
-library(tidyEOF)
-
-test2 <- get_anomalies(test, scale = TRUE, monthly = TRUE)
-rast(test)
-library(scico)
-ggplot() +
-  geom_stars( data = test2[,,,1:12]) +
-  facet_wrap(~time) +
-  scale_fill_scico(palette = 'vik', midpoint = 0)
-```
-
-```{r}
-test3 <- read_ncdf('~/Dropbox (UFL)/CanRCM4-EU_Cordex/tas_EUR-22_CCCma-CanESM2_historical_r1i1p1_CCCma-CanRCM4_r2_mon_199101-200012.nc')
-library(tidyEOF)
-
-test4 <- get_anomalies(test3, scale = TRUE, monthly = TRUE)
-
-library(scico)
-ggplot() +
-  geom_stars( data = test4[,,,1:12]) +
-  facet_wrap(~time) +
-  scale_fill_scico(palette = 'vik', midpoint = 0)
 ```
