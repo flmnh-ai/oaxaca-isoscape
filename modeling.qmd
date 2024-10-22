@@ -19,6 +19,7 @@ library(tidymodels)
 library(spatialsample)
 library(future)
 library(bonsai)
+library(lightgbm)
 library(vip)
 
 plan(multisession) # use all available cores for parallel processing
@@ -35,7 +36,7 @@ looks like everything but vars3 is the same projection, just not necessarily nam
 ```{r}
 vars1 <- list.files('data/data-raw/isotope_predictors', pattern = 'reproj', full.names = TRUE)[c(3:4, 6:9, 11:12, 21:22)] |>
   read_stars() %>%
-    setNames(., str_remove(names(.), '_reproj.tif'))
+  setNames(., str_remove(names(.), '_reproj.tif'))
 
 eck4 <- st_crs(vars1)
 
@@ -66,20 +67,20 @@ predictors <- c(vars1, vars2, vars3, vars4) |>
 
 
 ```{r}
-oaxaca_bbox <- st_bbox(c(xmin = -106, xmax = -92, ymin = 12, ymax = 24), crs = 4326) |>
+oaxaca_bbox <- st_bbox(c(xmin = -98, xmax = -95, ymin = 16, ymax = 18), crs = 4326) |>
   st_transform(eck4) 
 
 world <- ne_countries() |>
   st_transform(eck4)
 
-oaxaca_preds <- st_crop(c(vars1, vars2, vars4), oaxaca_bbox) |>
+oaxaca_predictors <- st_crop(c(vars1, vars2, vars4), oaxaca_bbox) |>
   st_as_stars() |>
   c(st_as_stars(st_crop(vars3, oaxaca_bbox))) |>
   select(-magt, -perma) # incomplete variables?
 ```
 
 ```{r}
-plot(merge(oaxaca_preds), join_zlim = TRUE)
+plot(merge(oaxaca_predictors), join_zlim = TRUE)
 ```
 
 ### Preprocess Global Isotope Observations
@@ -178,8 +179,8 @@ autoplot(folds)
 ```{r}
 rf_mod <- rand_forest(mode = 'regression',
                       mtry = tune(),
-                      min_n = tune()) |>
-  set_engine('ranger', importance = 'permutation')
+                      min_n = tune()) #|>
+ # set_engine('ranger', importance = 'permutation')
 
 rec <- recipe(Sr ~ ., train) |>
   update_role(c(type, geometry), new_role = 'other') |>
@@ -193,7 +194,7 @@ boost_mod <- boost_tree(mode = 'regression',
                         loss_reduction = tune(), 
                         min_n = tune()) |>
   set_engine('lightgbm', 
-             importance = 'permutation', 
+             #importance = 'permutation', 
              num_leaves = tune())
 
 #bart_mod <- bart(mode = 'regression', 
@@ -212,9 +213,9 @@ rf_params <- extract_parameter_set_dials(rf_wflw) |>
 
 boost_params <- extract_parameter_set_dials(boost_wflw) |>
   update(loss_reduction = loss_reduction(range = c(-10, -4)),
-         learn_rate = learn_rate(range = c(-4, -1)))
+         learn_rate = learn_rate(range = c(-3, -1)))
 
-control <- control_grid(save_pred = TRUE, pkgs = 'sf') # needed for parallel processing when geometry columns present
+control <- control_grid(pkgs = 'sf') # needed for parallel processing when geometry columns present
 
 resamp_rf <- tune_grid(rf_wflw, folds, 
                        grid = 40, 
@@ -222,12 +223,13 @@ resamp_rf <- tune_grid(rf_wflw, folds,
                        control = control)
 
 resamp_boost <- tune_grid(boost_wflw, folds, 
-                          grid = 80, 
+                          grid = 200, 
                           param_info = boost_params, 
                           control = control)
 #resamp_bart <- tune_grid(bart_wflw, folds, grid = 30, control = control)
 ```
 
+.0031
 ```{r}
 autoplot(resamp_rf)
 ```
@@ -271,19 +273,18 @@ vip(extract_fit_engine(base_fit), num_features = 60)
 ```{r}
 augment(final_fit, dat) %>%
   ggplot(aes(sr, .pred)) +
-  geom_point(aes(color = type), size = 0.2, alpha = 0.5) +
+  geom_point(aes(color = type), size = 0.4, alpha = 0.5) +
   geom_abline() +
   coord_equal() +
   theme_bw()
 
 augment(base_fit, dat) %>%
   ggplot(aes(sr, .pred)) +
-  geom_point(aes(color = type), size = 0.2, alpha = 0.5) +
+  geom_point(aes(color = type), size = 0.4, alpha = 0.5) +
   geom_abline() +
   coord_equal() +
   theme_bw()
 ```
-# Oaxa predictions
 # Testing on Oaxaca predictions
 
 ```{r}
