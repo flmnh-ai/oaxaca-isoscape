@@ -86,10 +86,10 @@ plot(merge(oaxaca_preds), join_zlim = TRUE)
 
 ```{r}
 pts <- read_excel('data/data-raw/1-s2.0-S0031018220302947-mmc1.xlsx', sheet = 2, guess_max = 100000) |>
-  mutate(sr = str_replace(`87Sr/86Sr`, ',', '.'),
-         sr = parse_number(sr)) |>
-  filter(sr <= 0.75) |> # confirm with sofia or look at types more critically
-  select(sr, Longitude, Latitude, type = `Type 1`) |> # keep Type 1 and 2 and Material?
+  mutate(Sr = str_replace(`87Sr/86Sr`, ',', '.'),
+         Sr = parse_number(Sr)) |>
+  filter(Sr <= 0.75) |> # confirm with sofia or look at types more critically
+  select(Sr, Longitude, Latitude, type = `Type 1`) |> # keep Type 1 and 2 and Material?
   mutate(type = if_else(type == 'water', 'Water', type),
          type = if_else(type == 'mammal', 'Mammal', type)) |>
   filter(type %in% c('Plant', 'Mammal', 'Water', 'Invertebrates', 'Minerals', 'Rock')) |>
@@ -126,15 +126,37 @@ ggplot() +
   theme_bw()
 ```
 
+### Preprocess Oaxaca Isotope Observations
+
+```{r}
+iso <- read_excel('data/data-raw/OAX Sr Result Table.xlsx') %>%
+  st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
+  st_transform(eck4) |>
+  rename(elevation = `Elevation (masl)`,
+         rooting_depth = `Plant Rooting Depth`)
+```
+
+
 ### Final Data for Modeling
 
 ```{r}
+pts_combined <- iso |>
+  select(Sr) |>
+  mutate(type = 'oaxaca_test') |>
+  bind_rows(pts)
+
 dat <- predictors |>
-  st_extract(pts) |>
-  mutate(sr = pts$sr,
-         type = factor(pts$type)) |>
-  select(-magt, -perma) |> # because not removed from rasters
-  remove_missing() # only necessary for rf
+  st_extract(pts_combined) |>
+  mutate(Sr = pts_combined$Sr,
+         type = factor(pts_combined$type)) |>
+  select(-magt, -perma, # because not removed from rasters
+         -c(ph, cec, clay, bulk, soc, nitrogen, ocd, ocs, w0010_30, w0010, w0033, w1500)) |> # remove soil variables 
+  remove_missing()# only necessary for rf
+```
+
+```{r}
+saveRDS(dat, 'data/data-derived/oaxaca_dat.rds')
+saveRDS(oaxaca_predictors, 'data/data-derived/oaxaca_predictors.rds')
 ```
 
 
@@ -142,10 +164,15 @@ dat <- predictors |>
 
 ```{r}
 set.seed(1111)
+
+splits <- make_splits(x = list(analysis = which(dat$type != 'oaxaca_test'),
+                      assessment = which(dat$type == 'oaxaca_test')),
+                      data = dat)
+train <- training(splits)                      
 #folds <- spatial_clustering_cv(dat, v = 8)
-#folds <- spatial_block_cv(dat)
-folds <- vfold_cv(dat, v = 5)
-#autoplot(folds)
+folds <- spatial_block_cv(train, repeats = 6)
+#folds <- vfold_cv(dat, v = 5)
+autoplot(folds)
 ```
 
 ```{r}
@@ -154,7 +181,7 @@ rf_mod <- rand_forest(mode = 'regression',
                       min_n = tune()) |>
   set_engine('ranger', importance = 'permutation')
 
-rec <- recipe(sr ~ ., dat) |>
+rec <- recipe(Sr ~ ., train) |>
   update_role(c(type, geometry), new_role = 'other') |>
   update_role_requirements('other', bake = FALSE)
 
@@ -214,25 +241,27 @@ autoplot(resamp_bart)
 ```
 
 ```{r}
-show_best(resamp)
-show_best(resamp_boost)
-#show_best(resamp_bart)
-
 select_best(resamp)
 select_best(resamp_boost)
 #select_best(resamp_bart)
 ```
 
 ```{r}
-final_fit <- resamp_boost %>%
-  select_best(metric = 'rmse') %>%
-  finalize_workflow(boost_wflw, .) %>%
-  fit(dat) 
+boost_final <- boost_mod |>
+  set_engine('lightgbm', importance = 'permutation') %>% # add in permutation importance
+  update_model(boost_wflw, .) |>
+  finalize_workflow(select_best(resamp_boost, metric = 'rmse')) |>
+  last_fit(splits) 
 
-base_fit <- resamp_rf %>%
-  select_best(metric = 'rmse') %>%
-  finalize_workflow(rf_wflw, .) %>%
-  fit(dat) 
+rf_final <- rf_mod |>
+  set_engine('ranger', importance = 'permutation') %>% # add in permutation importance
+  update_model(rf_wflw, .) |>
+  finalize_workflow(select_best(resamp_rf, metric = 'rmse')) |>
+  last_fit(splits)
+```
+```{r}
+collect_metrics(boost_final)
+collect_metrics(rf_final)
 ```
 
 ```{r}
@@ -255,71 +284,47 @@ augment(base_fit, dat) %>%
   theme_bw()
 ```
 # Oaxa predictions
+# Testing on Oaxaca predictions
 
 ```{r}
-mex_preds <- predict(oaxaca_preds, 
-                     extract_fit_parsnip(final_fit), 
-                     na.rm = TRUE)
+oaxaca_predictions <- oaxaca_predictors |> 
+  select(-c(ph, cec, clay, bulk, soc, nitrogen, ocd, ocs, w0010_30, w0010, w0033, w1500)) |>
+           predict(final_fit)
+
 ```
 
 ```{r}
-#library(terra)
-mex_preds <- oaxaca_preds |>
-  terra::rast() |>
-  setNames(names(oaxaca_preds)) |>
-  terra::predict(extract_fit_parsnip(base_fit), na.rm = TRUE)
-  #terra::predict(extract_fit_parsnip(final_fit), na.rm = TRUE)
+plot(merge(oaxaca_predictors) |> st_crop(st_bbox(iso)), join_zlim = TRUE)
+```
 
-terra::plot(mex_preds)
-#oaxaca_predictions <- predict(oaxaca_preds, extract_fit_parsnip(final_fit), na.rm = TRUE)
+
+```{r}
+ggplot(iso) +
+  geom_stars(data = oaxaca_predictions) +
+  geom_sf() +
+  scale_fill_viridis_c() +
+  theme_bw()
 ```
 
 ```{r}
-iso <- read_excel('data/data-raw/OAX Sr Result Table.xlsx') %>%
-  st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
-  st_transform(st_crs(mex_preds))
+mapview::mapview(oaxaca_predictions) + mapview::mapview(iso)
 ```
 
-```{r}
-plot(iso)
-```
 
 ```{r}
-terra::extract(mex_preds, iso, bind = TRUE) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
-```
-
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point(aes(color = Branch)) +
-  geom_abline()
-```
-
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
+ggplot(iso, aes(Sr, .pred)) +
   geom_point(aes(color = Locality)) +
-  geom_abline()
-```
+  geom_abline(color = 'red', linetype = 2) +
+  theme_bw()
 
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
+ggplot(iso, aes(Sr, .pred)) +
   geom_point(aes(color = `Plant Rooting Depth`)) +
-  geom_abline()
+    geom_abline(color = 'red', linetype = 2) +
+  theme_bw()
+
+ggplot(iso, aes(Sr, .pred)) +
+  geom_point(aes(color = Species)) +
+    geom_abline(color = 'red', linetype = 2) +
+  theme_bw()
 ```
 
-```{r}
-terra::extract(mex_preds, iso, bind=T) |>
-  as.data.frame() |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point(aes(color = Species)) +
-  geom_abline()
-```
