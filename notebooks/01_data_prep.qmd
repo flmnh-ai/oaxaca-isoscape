@@ -19,11 +19,12 @@ library(sf) # for spatial data
 library(rnaturalearth) # for world map data
 library(patchwork)
 library(here)
+library(dggridR)
 ```
 
-### Preprocess Global Raster Predictors
+## Preprocess Global Raster Predictors
 
-#### Bataille et al. (2020) Isotope Predictors
+### Bedrock isotope predictors
 
 Get the list of predictor files and names produced from the original analysis by Bataille et al. (2020).
 
@@ -44,18 +45,12 @@ Some of the variables have slightly different origins and extents, so we need to
 vars1 <- rast(pred_files[c(4, 15, 18)])
 names(vars1) <- pred_names[c(4, 15, 18)]
 eck4 <- st_crs(crs(vars1))
-#vars1[[1]] <- as.factor(vars1[[1]])
 
 vars2 <- rast(pred_files[c(1,2,3,20,21)])
 crs(vars2) <- crs(vars1)
 names(vars2) <- pred_names[c(1,2,3,20,21)]
 
-#vars3 <- rast(pred_files[23]) |>
-# project(vars1, method = 'near') |>
-#  as.factor()
-#names(vars3) <- 'sediment_type'
-
-predictors <- c(vars1, vars2)#, vars3)
+predictors <- c(vars1, vars2)
 bedrock_predictors <- predictors[[3:8]]
 other_predictors <- predictors[[1:2]]
 
@@ -63,9 +58,9 @@ bedrock_pcs <- prcomp(bedrock_predictors, scale. = TRUE, maxcell = 10000000, ret
 bedrock_pc_names <- c("bedrock_age_sr_gradient", "bedrock_young_highSrVar", "bedrock_ageRange_SrContrast")
 ```
 
-#### Other Global Predictors
+### Soil
 
-Get other global predictors from the geodata package (elevation and soils) and the CHELSA climate dataset.
+Soilgrids 250m, already aggregated to 1km.
 
 ```{r}
 soils <- here('data/raw/soilgrids') |>
@@ -88,10 +83,14 @@ soil_pc_names <- c(
 )
 ```
 
+### Elevation
 ```{r}
 elevation <- geodata::elevation_global(0.5, path = here('data/raw'))
 names(elevation) <- 'elevation'
+```
 
+### Climate
+```{r}
 # climate data
 climate <- list.files(here('data/raw/CHELSA_V2_bio_clim'), full.names = TRUE) |>
   rast()
@@ -115,8 +114,8 @@ climate_pc_names <- c(
 )
 ```
 
-Aerosols deposition from MERRA2
-
+### Aerosol Deposition
+Dry and wet aerosol deposition from MERRA-2. Run `R/aerosol_deposition.R` first to get the data ready.
 ```{r}
 aerosols_stars <- readRDS(here('data/derived/aerosols.rds'))
   
@@ -134,10 +133,11 @@ aerosol_pc_names <- c(
 )
 ```
 
-#### Mexico Predictor Data
+## Mexico Predictor Data
 
 This is too much data to keep in memory. Because we're only making spatial predictions for Mexico, we'll crop the predictors to the bounding box of Mexico so we can work with a smaller dataset.
 
+Define a function to fill gaps in the rasters.
 ```{r}
 fillNA <- function(x, method = 'mean') {
   focal(x, w = 3, fun = method, na.policy = 'only', na.rm = TRUE) |>
@@ -209,7 +209,7 @@ writeRaster(mexico_predictors, here('data/derived/mexico_predictors.tif'), overw
 mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))
 ```
 
-### Preprocess Global Isotope Observations
+## Global Isotope Observations
 
 Now we'll load the global isotope observations from Bataille et al. (2020) and filter them to only include the types of samples we're interested in (animals, plants, soil, and water) and remove any samples with Sr isotope ratios greater than 0.75 (to remove any outliers that might be due to contamination or other issues). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
 
@@ -236,7 +236,6 @@ pts2 <- here('data/raw/Wang et al./data/Wang_et_al_Dataset_S1.xlsx') |>
          type = if_else(material == 'plant', 'plant', if_else(material == 'Soil leachates', 'soil', 'animal'))) |>
   filter(material != 'insect') 
 
-#5910
 pts3 <- here('data/raw/1-s2.0-S0031018220302947-mmc1.xlsx') |>
   read_excel(sheet = 2, guess_max = 1000000) |>
   filter(Source.of.data.reference.ID != 144, # location centroids not correct
@@ -284,6 +283,10 @@ mapview(pts3 |> st_jitter(500) |> filter(Source.of.data.reference.ID == 45), zco
 mapview(pts1, color = 'yellow') + mapview(pts2, color = 'green') + mapview(pts3 |> filter(type == 'human') |> st_jitter(500), color = 'orange') + mapview(cambio |> st_jitter(500), color = 'red') + mapview(pts35, color = 'purple')
 ```
 
+#### Preprocess Oaxaca Isotope Observations
+
+Now we'll load the Oaxaca isotope observations and filter them to only include the types of samples we're interested in (plants) and remove any samples with Sr isotope ratios greater than 0.78 (to remove any outliers that might be due to contamination or other issues). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
+
 ```{r}
 oaxaca_plants <- read_excel(here('data/raw/OAX Sr Result Table.xlsx')) %>%
   st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
@@ -313,7 +316,8 @@ saveRDS(pts_combined, 'pts_combined.rds')
 mapview(pts_combined, zcol = 'type')
 ```
 
-Visualize the results.What's the distribution of global Sr values? What's the distribution of sample types?
+### Visualizations
+Visualize the results. What's the distribution of global Sr values? What's the distribution of sample types?
 
 ```{r, fig.width=10, fig.height=8}
 world <- ne_countries() |>
@@ -383,11 +387,8 @@ e / (f + (g / h) + plot_layout(widths = c(2,.7))) + plot_annotation(tag_levels =
 #ggsave('data_mexico.png', width = 8, height = 8)
 ```
 
-#### Preprocess Oaxaca Isotope Observations
 
-Now we'll load the Oaxaca isotope observations and filter them to only include the types of samples we're interested in (plants) and remove any samples with Sr isotope ratios greater than 0.78 (to remove any outliers that might be due to contamination or other issues). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
-
-### Final Data for Modeling
+## Final Data for Modeling
 
 ```{r}
 elevation_extract <- terra::extract(elevation, 
@@ -466,13 +467,11 @@ dat <- pts_combined |>
 select(-cell)
 ```
 
-```{r}
-library(mapview)
-mapview(dat, zcol = 'is_outlier')
-```
+### Spatial binning
+
+Use a discrete global grid to create equal area spatial bins for the global data
 
 ```{r}
-library(dggridR)
 dggs <- dgconstruct(res = 4)
 grid <- dgearthgrid(dggs) |>
   st_wrap_dateline() |>
@@ -485,13 +484,13 @@ coords <- dat |>
 
 dat$seqnum <- dgGEO_to_SEQNUM(dggs, coords[,1], coords[,2])$seqnum
 
-
 ggplot() +
   geom_sf(data = grid) +
   geom_sf(data = dat, aes(color = seqnum))
-
 ```
 
+
+Save the final result.
 ```{r}
 saveRDS(dat, here('data/derived/dat.rds'))
 ```
