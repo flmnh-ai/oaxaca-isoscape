@@ -20,6 +20,7 @@ library(rnaturalearth) # for world map data
 library(patchwork)
 library(here)
 library(dggridR)
+source(here('R/helpers.R'))
 ```
 
 ## Preprocess Global Raster Predictors
@@ -44,7 +45,7 @@ Some of the variables have slightly different origins and extents, so we need to
 ```{r}
 vars1 <- rast(pred_files[c(4, 15, 18)])
 names(vars1) <- pred_names[c(4, 15, 18)]
-eck4 <- st_crs(crs(vars1))
+#eck4 <- st_crs(crs(vars1))
 
 vars2 <- rast(pred_files[c(1,2,3,20,21)])
 crs(vars2) <- crs(vars1)
@@ -309,12 +310,123 @@ pts_combined <- oaxaca_plants |>
 ```
 
 ```{r}
-saveRDS(pts_combined, 'pts_combined.rds')
+saveRDS(pts_combined, here('data/derived/pts_combined.rds'))
 ```
 
 ```{r}
-mapview(pts_combined, zcol = 'type')
+pts_combined <- readRDS(here('data/derived/pts_combined.rds'))
 ```
+
+```{r}
+mapview::mapview(pts_combined, zcol = 'type')
+```
+
+## Final Data for Modeling
+
+```{r}
+elevation_extract <- terra::extract(elevation, 
+                                    st_transform(pts_combined, 4326), 
+                                    ID = FALSE, 
+                                    search_radius = 5000,
+                                    #  cell = TRUE,
+                                    na.rm = TRUE) |>
+  select(elevation)#, cell)
+
+extract_fun <- function(x, rast, crs = 4326){
+  terra::extract(rast[[x]], st_transform(pts_combined, crs = crs), 
+                 ID = FALSE, 
+                 search_radius = 5000,
+                 na.rm = TRUE)[,1, drop = FALSE]
+}  
+
+climate_extract <- map_dfc(1:nlyr(climate), extract_fun, climate) %>%
+  predict(climate_pcs, .) %>%
+  .[,1:7] %>%
+  as_tibble() |> 
+  setNames(climate_pc_names)
+
+soils_extract <- map_dfc(1:nlyr(soils), extract_fun, soils, crs(soils)) %>%
+  predict(soil_pcs, .) %>%
+  .[,1:5] |>
+  as_tibble() |> 
+  setNames(soil_pc_names)
+
+aerosol_extract <- terra::extract(aerosols, 
+                                  st_transform(pts_combined, 4326), 
+                                  ID = FALSE, 
+                                  method = 'bicubic', 
+                                  na.rm = TRUE) %>%
+  predict(aerosol_pcs, .) %>%
+  .[,1:5] |>
+  as_tibble() |>
+  setNames(aerosol_pc_names)
+
+
+bedrock_extract <- map_dfc(1:nlyr(bedrock_predictors), extract_fun, bedrock_predictors, eck4) %>%
+  predict(bedrock_pcs, .) %>%
+  .[,1:3] |>
+  as_tibble() |>
+  setNames(bedrock_pc_names)
+
+other_extract <-  map_dfc(1:nlyr(other_predictors), extract_fun, other_predictors, eck4) 
+```
+
+```{r}
+dat <- pts_combined |> 
+  bind_cols(bedrock_extract) |>
+  bind_cols(climate_extract) |>
+  bind_cols(aerosol_extract) |>
+  bind_cols(elevation_extract) |> 
+  bind_cols(other_extract) |>
+  bind_cols(soils_extract) |>
+  mutate(elevation = as.numeric(elevation))# |>
+  # group_by(cell) %>%
+  # mutate(
+  #   n_points = n(),
+  #   median_sr = median(Sr, na.rm = TRUE),
+  #   mad_sr = median(abs(Sr - median_sr), na.rm = TRUE),
+  #   # Only calculate thresholds and flag outliers if enough points
+  #   threshold = if_else(n_points >= 5,
+  #     case_when(
+  #       median_sr < 0.710 ~ min(3 * mad_sr, 0.0008),
+  #       TRUE ~ min(3 * mad_sr, 0.0036)
+  #     ),
+  #     NA_real_
+  #   ),
+  #   is_outlier = if_else(!is.na(threshold), abs(Sr - median_sr) > threshold, FALSE)
+  # ) %>%
+  # ungroup() |>
+  # select(-c(n_points, median_sr, mad_sr, threshold, cell))
+#select(-cell)
+```
+
+### Spatial binning
+
+Use a discrete global grid to create equal area spatial bins for the global data
+
+```{r}
+dggs <- dgconstruct(res = 4)
+grid <- dgearthgrid(dggs) |>
+  st_wrap_dateline() |>
+  st_transform(eck4)
+plot(grid)
+
+coords <- dat |>
+  st_transform(4326) |>
+  st_coordinates()
+
+dat$seqnum <- dgGEO_to_SEQNUM(dggs, coords[,1], coords[,2])$seqnum
+
+ggplot() +
+  geom_sf(data = grid) +
+  geom_sf(data = dat, aes(color = seqnum))
+```
+
+Save the final result.
+```{r}
+saveRDS(dat, here('data/derived/dat.rds'))
+```
+
 
 ### Visualizations
 Visualize the results. What's the distribution of global Sr values? What's the distribution of sample types?
@@ -387,110 +499,3 @@ e / (f + (g / h) + plot_layout(widths = c(2,.7))) + plot_annotation(tag_levels =
 #ggsave('data_mexico.png', width = 8, height = 8)
 ```
 
-
-## Final Data for Modeling
-
-```{r}
-elevation_extract <- terra::extract(elevation, 
-                          st_transform(pts_combined, 4326), 
-                          ID = FALSE, 
-                          search_radius = 5000,
-                          cell = TRUE,
-                          na.rm = TRUE) |>
-  select(elevation, cell)
-
-test_fun <- function(x, rast, crs = 4326){
-  terra::extract(rast[[x]], st_transform(pts_combined, crs = crs), 
-                          ID = FALSE, 
-                          search_radius = 5000,
-                          na.rm = TRUE)[,1, drop = FALSE]
-}  
-
-climate_extract <- map_dfc(1:nlyr(climate), test_fun, climate) %>%
-  predict(climate_pcs, .) %>%
-  .[,1:7] %>%
-  as_tibble() |> 
-  setNames(climate_pc_names)
-
-soils_extract <- map_dfc(1:nlyr(soils), test_fun, soils, crs(soils)) %>%
-  predict(soil_pcs, .) %>%
-  .[,1:5] |>
-  as_tibble() |> 
-  setNames(soil_pc_names)
-
-aerosol_extract <- terra::extract(aerosols, 
-                         st_transform(pts_combined, 4326), 
-                         ID = FALSE, 
-                         method = 'bicubic', 
-                         na.rm = TRUE) %>%
-  predict(aerosol_pcs, .) %>%
-  .[,1:5] |>
-  as_tibble() |>
-  setNames(aerosol_pc_names)
-  
-
-bedrock_extract <- map_dfc(1:nlyr(bedrock_predictors), test_fun, bedrock_predictors, eck4) %>%
-  predict(bedrock_pcs, .) %>%
-  .[,1:3] |>
-  as_tibble() |>
-  setNames(bedrock_pc_names)
-
-other_extract <-  map_dfc(1:nlyr(other_predictors), test_fun, other_predictors, eck4) 
-```
-
-```{r}
-dat <- pts_combined |> 
-  bind_cols(bedrock_extract) |>
-  bind_cols(climate_extract) |>
-  bind_cols(aerosol_extract) |>
-  bind_cols(elevation_extract) |> 
-  bind_cols(other_extract) |>
-  bind_cols(soils_extract) |>
-  mutate(elevation = as.numeric(elevation)) |>
-  # group_by(cell) %>%
-  # mutate(
-  #   n_points = n(),
-  #   median_sr = median(Sr, na.rm = TRUE),
-  #   mad_sr = median(abs(Sr - median_sr), na.rm = TRUE),
-  #   # Only calculate thresholds and flag outliers if enough points
-  #   threshold = if_else(n_points >= 5,
-  #     case_when(
-  #       median_sr < 0.710 ~ min(3 * mad_sr, 0.0008),
-  #       TRUE ~ min(3 * mad_sr, 0.0036)
-  #     ),
-  #     NA_real_
-  #   ),
-  #   is_outlier = if_else(!is.na(threshold), abs(Sr - median_sr) > threshold, FALSE)
-  # ) %>%
-  # ungroup() |>
-  # select(-c(n_points, median_sr, mad_sr, threshold, cell))
-select(-cell)
-```
-
-### Spatial binning
-
-Use a discrete global grid to create equal area spatial bins for the global data
-
-```{r}
-dggs <- dgconstruct(res = 4)
-grid <- dgearthgrid(dggs) |>
-  st_wrap_dateline() |>
-  st_transform(eck4)
-plot(grid)
-
-coords <- dat |>
-  st_transform(4326) |>
-  st_coordinates()
-
-dat$seqnum <- dgGEO_to_SEQNUM(dggs, coords[,1], coords[,2])$seqnum
-
-ggplot() +
-  geom_sf(data = grid) +
-  geom_sf(data = dat, aes(color = seqnum))
-```
-
-
-Save the final result.
-```{r}
-saveRDS(dat, here('data/derived/dat.rds'))
-```

@@ -20,6 +20,35 @@ inverse_logit_transform <- function(x, min_val = 0.703, max_val = 0.78) {
   p * (max_val - min_val) + min_val
 }
 
+eck4 <- sf::st_crs('PROJCRS["Eckert_IV",
+        BASEGEOGCRS["WGS 84",
+                    DATUM["unknown",
+                          ELLIPSOID["WGS84",6378137,298.257223563,
+                                    LENGTHUNIT["metre",1,
+                                               ID["EPSG",9001]]]],
+                    PRIMEM["Greenwich",0,
+                           ANGLEUNIT["Degree",0.0174532925199433]]],
+        CONVERSION["unnamed",
+                   METHOD["Eckert IV"],
+                   PARAMETER["Longitude of natural origin",0,
+                             ANGLEUNIT["Degree",0.0174532925199433],
+                             ID["EPSG",8802]],
+                   PARAMETER["False easting",0,
+                             LENGTHUNIT["metre",1],
+                             ID["EPSG",8806]],
+                   PARAMETER["False northing",0,
+                             LENGTHUNIT["metre",1],
+                             ID["EPSG",8807]]],
+        CS[Cartesian,2],
+        AXIS["(E)",east,
+             ORDER[1],
+             LENGTHUNIT["metre",1,
+                        ID["EPSG",9001]]],
+        AXIS["(N)",north,
+             ORDER[2],
+             LENGTHUNIT["metre",1,
+                        ID["EPSG",9001]]]]')
+
 varimp <- function(model) {
   # Check dimensions of model$varcount
   if (length(dim(model$varcount)) == 3) {
