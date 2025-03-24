@@ -49,7 +49,39 @@ eck4 <- sf::st_crs('PROJCRS["Eckert_IV",
              LENGTHUNIT["metre",1,
                         ID["EPSG",9001]]]]')
 
+convergence <- function(workflow){
+  bart_fit_engine <- extract_fit_engine(workflow)
+  plot(bart_fit_engine)
+
+  print(t(bart_fit_engine$sigma) |>
+    as_tibble() |>
+    pivot_longer(everything()) |>
+    ggplot(aes(value, color = name)) +
+    geom_density())
+
+  print(t(bart_fit_engine$sigma) |>
+    as_tibble() |>
+    mutate(iter = 1:n()) |>
+    pivot_longer(-iter) |>
+    ggplot(aes(iter, value, color = name)) +
+    geom_line() +
+    facet_wrap(~name))
+
+  sigma_mcmc <- t(bart_fit_engine$sigma) |>
+    as_tibble() |>
+    map(mcmc) |>
+    mcmc.list()
+  plot(sigma_mcmc)
+
+  # Check Gelman-Rubin statistic
+  print(gelman.diag(sigma_mcmc))
+
+  # Effective sample size
+  effectiveSize(sigma_mcmc)
+}
+
 varimp <- function(model) {
+  model <- extract_fit_engine(model)
   # Check dimensions of model$varcount
   if (length(dim(model$varcount)) == 3) {
     # For 3D array: Convert to list of matrices (one per chain)
