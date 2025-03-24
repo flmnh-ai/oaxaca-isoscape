@@ -1,120 +1,158 @@
 ---
-title: "02_modeling"
+title: "Model fitting and evaluation"
 format: html
 editor: visual
 ---
 
+## Setup
+
 ```{r}
 # machine learning packages
 library(tidymodels) # for modeling workflows
-library(bonsai) # for LightGBM
-source('varimp.R')
 library(here)
 library(sf)
+library(coda)
+library(DALEXtra)
+source(here('R/helpers.R'))
 
 # for parallel processing
 library(future) 
+
+mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 13, ymax = 23),
+                       crs = 4326) |>
+  st_transform(eck4)
+
+
+train_bbox <- st_bbox(c(xmin = -115, xmax = -50, ymin = -90, ymax = 90),
+                       crs = 4326) |>
+  st_transform(eck4)
+
+rm1 <- terra::rast(here('data/raw/isotope_predictors/rm1_reproj.tif'))
 ```
 
-## Modeling
-
-### Data Splitting
-
-
-```{r}
-logit_transform <- function(x, min_val = 0.703, max_val = 0.78) {
-  # If min and max aren't provided, use the data min/max with a small buffer
-  if(is.null(min_val)) min_val <- min(x, na.rm = TRUE) - 0.001
-  if(is.null(max_val)) max_val <- max(x, na.rm = TRUE) + 0.001
-  
-  # Scale to [0,1]
-  x_scaled <- (x - min_val) / (max_val - min_val)
-  
-  # Handle boundary cases to avoid Inf/-Inf
-  x_scaled[x_scaled <= 0] <- 0.001
-  x_scaled[x_scaled >= 1] <- 0.999
-  
-  # Apply logit
-  log(x_scaled / (1 - x_scaled))
-}
-
-# Inverse logit for back-transformation
-inverse_logit_transform <- function(x, min_val = 0.703, max_val = 0.78) {
-  p <- 1 / (1 + exp(-x))
-  p * (max_val - min_val) + min_val
-}
-```
+### Load Data
 
 ```{r}
 dat <- readRDS(here('data/derived/dat.rds')) |>
-  filter(Sr <= 0.76) |>  
-  filter(!is_outlier) |>
-  mutate(water = type == 'water') |> # note we chnaged this in the otehr notebooks
-  select(-is_outlier) |>
-  filter(!if_any(c(bedrock_age_sr_gradient:soil_chemical_mineral), is.na)) |>
-  mutate(Sr = logit_transform(Sr))
-
-mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23),
-                       crs = 4326) |>
-  st_transform(dat)
-
-#can we keep the human data in train?
-train <- dat |>
+ # filter(Sr <= 0.77) |>  # remember to adjust maxval in logit_transform too
+  #mutate(water = type == 'water') |>
+  filter(!if_any(c(bedrock_age_sr_gradient:distance), is.na)) |> #soil_chemical_mineral), is.na)) |>
+ # filter(!(oaxaca & Sr > 0.71)) |> # remove two anomalous points from SMT
+  mutate(Sr = logit_transform(Sr)) |>
   mutate(mexico = lengths(st_intersects(geometry, st_as_sfc(mexico_bbox))) > 0) |>
-  filter(type != 'human', #| mexico == FALSE, # is this right?
-         oaxaca == FALSE) |>
- #filter(mexico) |>
-  select(-geometry, -mexico) # hack to move geometry to last column
-
+  select(-geometry) |>  # hack to move geometry to last column
+  #filter(!(type %in% c('water', 'soil', 'human'))) |>
+  st_crop(train_bbox)
+  
+train <- dat |>
+  filter(!mexico) |> #type != 'human' | mexico == FALSE, # is this right? oaxaca == FALSE) |>
+# filter(mexico) |> # to get just mexio training data
+  select(-mexico) # hack to move geometry to last column
 
 test <- dat |>
-  filter(type == 'human' | oaxaca == TRUE) |>
-  st_crop(mexico_bbox) |>
+  filter(mexico) |>
+  select(-mexico) |>
+  #filter(type == 'human' | oaxaca == TRUE) |>
+  #st_crop(mexico_bbox) |>
   mutate(type2 = replace_na(type2, ''), material = replace_na(material, ''))
+
+
+train_mean <- mean(train$Sr)
+train_sd <- sd(train$Sr)
+
+#train$Sr <- (train$Sr - train_mean) / train_sd
+#test$Sr <- (test$Sr - train_mean) / train_sd
 ```
 
 ```{r}
 mapview::mapview(train) + mapview::mapview(test, color = 'red')
 ```
 
-```{r}
-splits <- make_splits(train, test)
+### Data Splits
 
+```{r}
+# initial splits
+splits <- make_splits(train, test)
+splits_oaxaca <- make_splits(bind_rows(train, filter(test, !oaxaca)), filter(test, oaxaca))
+splits_mexico <- make_splits(train, filter(test, !oaxaca))
 # calculate cv folds
+
+mexico_folds <- manual_rset(list(splits_mexico, splits_mexico, splits_mexico, splits_mexico, splits_mexico), ids = as.character(1:5))
 set.seed(1111)
-folds <- group_vfold_cv(train, group = seqnum,  v = 5, repeats = 4, balance = 'observations')
+folds <- group_vfold_cv(train, group = seqnum,  v = 8, repeats = 2, balance = 'observations')
 ```
 
-### Model Definition
+## Model Fitting
+
+### Modeling Workflow
 
 Define the recipe for the modeling workflow.
 
 ```{r}
 rec <- recipe(Sr ~ ., train) |> 
-  update_role(c(geometry, oaxaca, type2, material, cell, seqnum, type), new_role = 'other') |>
-  update_role_requirements('other', bake = FALSE) |>
+  update_role(c(geometry, oaxaca, type2, material, seqnum), 
+              new_role = 'other') |>
+  update_role_requirements('other', bake = FALSE) |> 
+### step_naomit(all_predictors(), -starts_with('soil')) |>
+  step_impute_knn(starts_with('soil')) |>
   step_normalize(all_numeric_predictors())
 
-bart_mod <- bart(mode = 'regression', 
-                 trees = 50,
+bart_mod <- parsnip::bart(mode = 'regression', 
+                 trees = tune(),
                  prior_terminal_node_coef = tune(), 
                  prior_terminal_node_expo = tune(),
-                 prior_outcome_range = tune()) %>%
-  set_engine('dbarts', nskip = 1000,#25000, 
-             ndpost = 500, 
-             usequants = TRUE)
+                 prior_outcome_range = tune()
+              ) %>%
+  set_engine('dbarts', nskip = 800,
+             #ndpost = 500, 
+             #usequants = TRUE
+             )
+
 
 bart_wflw <- workflow(rec, bart_mod)
 ```
 
-
 ### Hyperparameter Tuning
-```{r}
-bart_params <- extract_parameter_set_dials(bart_mod) |>
-  update(#trees = trees(range = c(10, 400)),
-         prior_outcome_range = prior_outcome_range(range = c(5, 40))
-  )
 
+Set the parameters through automatic estimation via Bayesian optimization. Start with an initial grid of 20 samples, then procede with the Bayesian iterations. We do this with the spatial cross validation.
+
+#### Initial Grid
+
+```{r}
+#bart_params <- extract_parameter_set_dials(bart_mod) |>
+#  update(trees = trees(range = c(25, 500)),
+#         prior_outcome_range = prior_outcome_range(range = c(1, 64))
+#  )
+
+bart_params <- crossing(
+  trees = c(25, 50, 100, 200, 400),
+  prior_outcome_range = c(1, 2, 4, 8, 16, 32, 64),
+  prior_terminal_node_coef = c(0.75, .95),
+  prior_terminal_node_expo = c(1, 2)
+)
+```
+
+use tune grid
+```{r}
+set.seed(1111)
+plan(multisession)
+
+bart_grid <- tune_grid(
+   bart_wflw,
+   resamples = mexico_folds,
+   grid = bart_params,
+   control = control_grid(pkgs = 'sf')
+ )
+
+
+plan(sequential)
+
+show_best(bart_grid, n = 20)
+autoplot(bart_grid)
+```
+
+#### Bayesian Optimization
+```{r}
 control <- control_bayes(
   pkgs = 'sf',
   no_improve = 30, 
@@ -122,27 +160,28 @@ control <- control_bayes(
   verbose_iter = TRUE,
   parallel_over = 'everything'
 )
-```
 
-```{r}
 set.seed(1111)
 plan(multisession)
 
 bart_bayes <- tune_bayes(
    bart_wflw,
-   resamples = folds,
+   resamples = mexico_folds,
    param_info = bart_params,
-   iter = 80, 
-   initial = 20, 
+   iter = 60, 
+   initial = bart_grid, 
    control = control
  )
 plan(sequential)
 
 show_best(bart_bayes, n = 20)
+select_by_one_std_err(bart_bayes, trees, 'rmse')
 autoplot(bart_bayes)
 ```
 
-best by one sd is 50 trees, 0.84 coef, 1.45 exp, 27 outcome range
+344	0.9796514	2.799981	17.88454	
+
+best by one sd is 50 trees, 0.84 coef, 1.45 exp, 27 outcome range: rmse-0.6437038, rsq .6 something
 best overall is 211, 0.83, 1.61, 17.78
 
 
@@ -151,200 +190,305 @@ best overall is 211, 0.83, 1.61, 17.78
 trees = 500, prior terminal node coef == 0.537, expo = 1.15. 0.003455
 or trees = 260, prior = .45, prior terminal node= 3
 prior node coef = 0.977 prior terminal exp 1.18, prior outcome range 5
-```{r}
-bart_fit <-#bart_mod |># bart_results |> 
-  select_best(bart_bayes, metric = 'rmse') %>%
-  finalize_workflow(bart_wflw, .)  |>
-  last_fit(splits)
 
-collect_metrics(bart_fit)
+Final workflow
+```{r}
+bart_wflw_final <- parsnip::bart(mode = 'regression',
+                        trees = 350,
+                        prior_outcome_range = 18,
+                        prior_terminal_node_expo = 2.8,
+                        prior_terminal_node_coef = 0.98
+) %>%
+  set_engine('dbarts', nskip = 800, ndpost = 2000, 
+             keepevery = 4, nchain = 8, nthread = 8, combinechains = FALSE
+  ) %>%
+  workflow(rec, .)
+```
+
+## Model Evaluation
+
+Fit the finalized workflow and predict on our two test datasets.
+```{r}
+results_mexico <- last_fit(bart_wflw_final, splits_mexico)
+results_oaxaca <- last_fit(bart_wflw_final, splits_oaxaca)
+```
+
+Check that both models are converging.
+```{r}
+convergence(results_mexico)
+convergence(results_oaxaca)
+```
+
+Look at the performance metrics on the logit scale.
+```{r}
+list(mexico = collect_metrics(results_mexico),
+     oaxaca = collect_metrics(results_oaxaca)) |>
+  list_rbind(names_to = 'model')  |>
+  select(model, .metric, .estimate) |>
+  pivot_wider(names_from = .metric, values_from = .estimate)
+```
+Compare to the geological baseline model.
+```{r}
+baseline_geology <- terra::extract(rm1, test, search_radius = 5000) |>
+  select(.pred = rm1_reproj) |>
+  bind_cols(test) |>
+  mutate(Sr = inverse_logit_transform(Sr)) |>
+  mutate(model = 'bedrock')
+        
+baseline_geology |>
+  group_by(oaxaca) |>
+  summarize(rmse = rmse_vec(.pred, Sr),
+         rsq = rsq_vec(.pred, Sr))
+```
+
+And on the original scale.
+```{r}
+baseline_geology |> 
+  filter(!oaxaca) |> # with or without oaxaca?
+  group_by(type) |>
+  summarize(rmse = rmse_vec(Sr, .pred),
+            rsq = rsq_vec(Sr, .pred))
+
+list(mexico = collect_predictions(results_mexico),
+     oaxaca = collect_predictions(results_oaxaca)) |>
+  list_rbind(names_to = 'model') |>
+  mutate(across(c(.pred, Sr), inverse_logit_transform)) |>
+  bind_rows(baseline_geology |> filter(!oaxaca)) |> # with or without oaxaca?
+  group_by(model) |>
+  summarize(rmse = rmse_vec(Sr, .pred),
+            rsq = rsq_vec(Sr, .pred))
 ```
 
 ```{r}
-fit_bart <- bart_fit |>
-  extract_fit_engine()
-  
-plot(fit_bart)
-```
-
-```{r}
-fit_bart$sigma |> plot(type = 'l')
-#fit_bart$sigest
-t(fit_bart$sigma) |> as_tibble() |> 
-  mutate(iter = 1:n()) |>
-  pivot_longer(-iter) |>
-  ggplot(aes(iter, value)) +
-    geom_line() +
-    facet_wrap(~name) 
-```
-
-```{r}
-library(coda)
-sigma_mcmc <- fit_bart$sigma |> mcmc()
-
-sigma_mcmc <- t(fit_bart$sigma) |>
-as_tibble() |>
-map(mcmc) |>
-mcmc.list()
-# Check Gelman-Rubin statistic
-gelman.diag(sigma_mcmc)
-
-# Effective sample size
-effectiveSize(sigma_mcmc)
-map(sigma_mcmc, effectiveSize)
-```
-
-```{r}
-fit_bart$sigest
-```
-
-```{r}
-library(bartMan)
-
-trees_data <- extractTreeData(model = fit_bart, data = test)
-stdMat <- viviBartMatrix(trees_data,
-                          type = 'standard',
-                          metric = 'propMean')
-
-vsupMat <- viviBartMatrix(trees_data,
-                          type = 'vsup',
-                          metric = 'propMean',
-                          metricError = "CV")
-viviBartPlot(stdMat)
-viviBartPlot(vsupMat,
-             max_desat = 1,
-             pow_desat = 0.6,
-             max_light = 0.6,
-             pow_light = 1,
-             label = 'CV')
-```
-
-
-
-```{r}
-library(DALEXtra)
-explainer <- explain_tidymodels(
-    boost_mod, 
-    data = dplyr::select(train, -Sr), 
-    y = train$Sr,
-    label = "lgbm"
-)
-
-pdp <- model_profile(explainer, N = NULL, 
-                        variables = c('rm1', 'agemax', 'soil_clay_cec_texture', 'srsrq1', 'climate_subtle_moisture_regime', 'aerosol_dry_wet_sulfate_organic_contrast'))
-
-names(train)[6:18]
-plot(pdp)
-
-as_tibble(pdp$agr_profiles) %>%
-    mutate(`_label_` = stringr::str_remove(`_label_`, "lgbm_")) %>%
-    ggplot(aes(`_x_`, inverse_boxcox(`_yhat_`, -5), color = `_label_`)) +
-    geom_line(size = 1.2, alpha = 0.8) +
-    labs(x = "Gross living area", 
-         y = "Sale Price (log)", 
-         color = NULL,
-         title = "Partial dependence profile for Ames housing sales",
-         subtitle = "Predictions from a random forest model")
-
-```
-
-```{r}
-explainer <- explain_tidymodels(
-    extract_fit_engine(bart_fit), 
-    data = dplyr::select(train, -Sr), 
-    y = train$Sr,
-    label = "bart"
-)
-
-pdp <- model_profile(explainer, N = NULL, 
-                        variables = c('rm1', 'agemax', 'soil_clay_cec_texture', 'srsrq1', 'climate_subtle_moisture_regime', 'aerosol_dry_wet_sulfate_organic_contrast'))
-
-plot(pdp)
-
-```
-
-```{r}
-augment(boost_mod, train) %>%
-  ggplot(aes((Sr), (.pred))) +
-  geom_point( size = 0.4, alpha = 0.5) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-
-augment(extract_fit_parsnip(bart_fit), train) %>%
-  ggplot(aes((Sr), (.pred))) +
-  geom_point( size = 0.4, alpha = 0.5) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-```
-
-```{r}
-augment(boost_mod, test) %>%
+results_mexico |>
+  extract_workflow() |>
+  augment(filter(test, !oaxaca)) |>
   mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr,.pred)) +
-  geom_point(aes(color = oaxaca), size = 1) +
-  geom_abline() +
- # coord_equal(xlim = c(.703, .717), ylim = c(.703, .717)) +
-  theme_bw()
+  group_by(type) |>
+  summarize(rmse = rmse_vec(Sr, .pred),
+            rsq = rsq_vec(Sr, .pred))
+
+results_oaxaca |>
+  extract_workflow() |>
+  augment(filter(test, !oaxaca)) |>
+  mutate(across(.pred:Sr, inverse_logit_transform)) |>
+  group_by(type) |>
+  summarize(rmse = rmse_vec(Sr, .pred),
+            rsq = rsq_vec(Sr, .pred))
+```
 
 
-augment(extract_fit_parsnip(bart_fit), test) %>%
-    mutate(across(.pred:Sr, inverse_logit_transform)) |>
+Test rmse is .001, which is remarkably close to the baseline within site sd from Bataille. That said, that was actually much smaller for those with ratios below 0.71, so this is not as good as it could be since much of our test set is largely below that threshold.
+
+
+```{r}
+results_mexico |>
+  extract_workflow() |>
+  augment(test) |>
+  mutate(across(.pred:Sr, inverse_logit_transform)) |>
+  mutate(error = .pred - Sr) |>
+  arrange(-abs(error))
+```
+
+
+Look at in sample predictions by type for the global data. Note the heteroskedasticity on the original scale.
+```{r}
+predict(extract_workflow(results_mexico), train, type = 'conf_int') |>
+  bind_cols(augment(extract_workflow(results_mexico), train)) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
   ggplot(aes(Sr, .pred)) +
-  geom_point(aes(color = oaxaca), size = 1) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(aes(color = type), size = 1) +
   geom_abline() +
-  coord_equal(xlim = c(.703, .717), ylim = c(.703, .717)) +
+  facet_wrap(~type, scales = 'free') +
   theme_bw()
 ```
 
-
-
-
+And the in and out of sample predictions for the Mexico regional data, without Oaxaca. So the first plot is the performance of the model on the Mexico data trained without seeing it, the second is trained having seen it.
 ```{r}
-augment(boost_mod, test) %>%
-  ggplot(aes(inverse_boxcox(Sr, -5), inverse_boxcox(.pred, -5))) +
-  geom_point(aes(color = oaxaca), size = 1) +
+predict(extract_workflow(results_mexico), filter(test, !oaxaca), type = 'conf_int') |>
+  bind_cols(augment(extract_workflow(results_mexico), filter(test, !oaxaca))) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
+  ggplot(aes(Sr, .pred)) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(aes(color = type), size = 1, alpha = 0.3) +
   geom_abline() +
-  coord_equal(xlim = c(.703, .717), ylim = c(.703, .717)) +
+  facet_wrap(~type, scales = 'free') +
   theme_bw()
 
-  
-  #interval - confidence in augment?
-  predict(extract_workflow(bart_fit), test, type = 'conf_int') |>
-    bind_cols(augment(extract_workflow(bart_fit), test)) |>
-    mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
-    ggplot(aes(Sr, .pred)) +
-    geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
-    geom_point(aes(color = oaxaca), size = 1) +
-    geom_abline() +
-    coord_equal() +
-    #coord_equal(xlim = c(.703, .717), ylim = c(.703, .717)) +
-    theme_bw()
+baseline_geology |>
+  filter(!oaxaca) |>
+ggplot(aes(Sr, .pred)) +
+  geom_point(aes(color = type), size = 1, alpha = 0.3) +
+  geom_abline() +
+  facet_wrap(~type, scales = 'free') +
+  theme_bw()
 
+predict(extract_workflow(results_oaxaca), filter(test, !oaxaca), type = 'conf_int') |>
+  bind_cols(augment(extract_workflow(results_oaxaca), filter(test, !oaxaca))) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
+  ggplot(aes(Sr, .pred)) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(aes(color = type), size = 1, alpha = 0.3) +
+  geom_abline() +
+  facet_wrap(~type, scales = 'free') +
+  theme_bw()
+```
+
+### Predictions on Oaxaca
+
+Train a final model on all the data.
+```{r}
+bart_final <- fit(bart_wflw_final, dat)
+
+bart_final_2 <- extract_recipe(bart_final) |>
+  step_rm(starts_with('type'), starts_with('sediment'), nitrogen, phosphorus) %>%
+  workflow(extract_spec_parsnip(bart_final)) |>
+  fit(dat)
 ```
 
 ```{r}
- terra::extract(mexico_predictors[['rm1']], test) |>
-  bind_cols(test) |>
-  rmse(Sr, rm1...2)
-
- terra::extract(mexico_predictors[['rm1']], test) |>
-  bind_cols(test) |>
-  rsq(Sr, rm1...2)
+convergence(bart_final)
+convergence(bart_final_2)
 ```
 
-```{r}
+Now look at how well three of our models perform on the Oaxaca data. Only the final model includes Oaxaca in the training set. But notice the second and third model are very close, which is great as it suggests the model is not overfitting to the Oaxaca data. That is, the fit does improve, but its not overfitting to the apparent outliers.
 
-  terra::extract(mexico_predictors[['rm1']], test) |>
-  bind_cols(test) |>
-   ggplot(aes((Sr), (rm1...2))) +
-  geom_point(aes(color = oaxaca), size = 1) +
+```{r}
+predict(extract_workflow(results_mexico), filter(test, oaxaca), type = 'conf_int') |>
+  bind_cols(augment(extract_workflow(results_mexico), filter(test, oaxaca))) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
+  ggplot(aes(Sr, .pred)) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(size = 1) +
+  geom_abline() +
+  coord_equal() +
+  theme_bw()
+
+predict(extract_workflow(results_oaxaca), filter(test, oaxaca), type = 'conf_int') |>
+  bind_cols(augment(extract_workflow(results_oaxaca), filter(test, oaxaca))) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
+  ggplot(aes(Sr, .pred)) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(size = 1) +
+  geom_abline() +
+  coord_equal() +
+  theme_bw()
+
+predict(bart_final, filter(test, oaxaca), type = 'conf_int') |>
+  bind_cols(augment(bart_final, filter(test, oaxaca))) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
+  ggplot(aes(Sr, .pred)) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(size = 1) +
+  geom_abline() +
+  coord_equal() +
+  theme_bw()
+
+predict(bart_final_2, filter(test, oaxaca), type = 'conf_int') |>
+  bind_cols(augment(bart_final, filter(test, oaxaca))) |>
+  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
+  ggplot(aes(Sr, .pred)) +
+  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
+  geom_point(size = 1) +
+  geom_abline() +
+  coord_equal() +
+  theme_bw()
+
+baseline_geology |>
+  filter(oaxaca) |>
+ggplot(aes(Sr, .pred)) +
+  geom_point(size = 1) +
   geom_abline() +
   coord_equal() +
   theme_bw()
 ```
+Interesting enough, the model trained without any data from mexico predicts slightly better on Oaxaca than the one with -- could be a convergence issue? oh, that's only for rsq, but not rmse. interesting.
+```{r}
+list(mexico = augment(extract_workflow(results_mexico), filter(test, oaxaca)),
+     oaxaca = collect_predictions(results_oaxaca),
+     full = augment(bart_final, filter(test, oaxaca)),
+     full2 = augment(bart_final_2, filter(test, oaxaca))) |>
+  list_rbind(names_to = 'model') |>
+  mutate(across(c(.pred, Sr), inverse_logit_transform)) |>
+  bind_rows(filter(baseline_geology, oaxaca)) |> 
+  group_by(model) |>
+  summarize(rmse = rmse_vec(Sr, .pred),
+            rsq = rsq_vec(Sr, .pred))
+```
 
+
+## Explainability
+
+### Variable Importance
+
+Use BART's native variable importance. These should all be roughly the same for each model version. It looks like our factor variables (sample type, sediment type) and fertilizer variables aren't used. We should consider dropping those from the final model.
+```{r}
+varimp(results_mexico)
+varimp(results_oaxaca)
+varimp(bart_final)
+vars <- varimp(bart_final_2)
+```
+
+
+```{r}
+ggsave(here('outputs/figures/bart_varimp.png'), height = 4, width = 6)
+```
+
+### Partial Dependence Plots
+
+```{r}
+explainer <- explain_tidymodels(bart_final_2, data = dplyr::select(dat, -Sr), y = dat$Sr)
+pdp <- model_profile(explainer, variables = as.character(arrange(vars, -varimps)$names[1:12]))
+```
+
+```{r}
+as_tibble(pdp$agr_profiles) %>%
+  mutate(`_yhat_` = inverse_logit_transform(`_yhat_`)) %>%
+    ggplot(aes(`_x_`, `_yhat_`)) +
+ # geom_line(data = as_tibble(pdp$cp_profiles) |> pivot_longer(bedrock_age_sr_gradient:pyroclastic), aes(`_x_`, `_yhat_`), color = 'black', size = 1.2, alpha = 0.8) +
+  geom_line(size = 1.2, alpha = 0.8) +
+  facet_wrap(~`_vname_`, scales = 'free') +
+  theme_bw() +
+  labs(y = 'Sr', x = 'Value')
+```
+
+
+```{r}
+test_pd <- dbarts::pdbart(bart_final_2, xind = 'bedrock_age_sr_gradient', levquants = c(0.05, seq(0.1, 0.9, 0.3)))
+plot(test_pd)
+```
+
+```{r}
+test_pd2 <- embarcadero::partial(bart_fit_engine2, x.vars = 'bedrock_age_sr_gradient', transform = FALSE)
+#test_pd2[[1]]$data <- test_pd2[[1]]$data |> mutate(across(-x, inverse_logit_transform))
+test_pd2
+```
+
+
+
+```{r}
+ggplot(dat, aes(sediment, Sr)) +
+  geom_boxplot()
+
+ggplot(dat, aes(pyroclastic, Sr)) +
+  geom_boxplot()
+
+ggplot(dat, aes(type, Sr)) +
+  geom_boxplot()
+```
+
+
+### SHAP analysis
+```{r}
+montealban <- st_drop_geometry(filter(test, type2 == 'Zapotec')[1,])
+# why the warning? is it the geometry column?
+shap_montealban <- predict_parts(explainer = explainer, new_observation = montealban, type = "shap", B = 20)
+
+plot(shap_montealban)
+```
+
+## Mapping Errors
 ```{r}
 errors <- augment(boost_final, train) |>
   st_as_sf() |>
@@ -381,4 +525,28 @@ ggplot() +
     pad_y = unit(0.2, "in"),
     style = ggspatial::north_arrow_fancy_orienteering
   )
+```
+
+
+### Varaible Interactions
+
+```{r}
+library(bartMan)
+
+trees_data <- extractTreeData(model = fit_bart, data = test)
+stdMat <- viviBartMatrix(trees_data,
+                          type = 'standard',
+                          metric = 'propMean')
+
+vsupMat <- viviBartMatrix(trees_data,
+                          type = 'vsup',
+                          metric = 'propMean',
+                          metricError = "CV")
+viviBartPlot(stdMat)
+viviBartPlot(vsupMat,
+             max_desat = 1,
+             pow_desat = 0.6,
+             max_light = 0.6,
+             pow_light = 1,
+             label = 'CV')
 ```
