@@ -6,7 +6,6 @@ editor: visual
 
 ```{r}
 # data management, processing, visualization
-#remotes::install_github('vdorie/dbarts')
 library(tidyverse) # for data manipulation
 library(tidymodels)
 library(stars) # for raster data
@@ -14,292 +13,27 @@ library(sf) # for spatial data
 library(rnaturalearth) # for world map data
 library(terra)
 library(here)
-source('varimp.R')
-source(here('logit.R'))
-library(coda)
+source(here('R/helpers.R'))
 library(scico)
-
-dat <- readRDS(here('data/derived/dat.rds')) |>
-  filter(Sr <= 0.77) |>  # remember to adjust maxval in logit_transform too
- # filter(!is_outlier) |>
-  #mutate(water = type == 'water') |>
-  mutate(type = factor(type)) |>
-  #select(-is_outlier) |>
-  filter(!if_any(c(bedrock_age_sr_gradient:distance), is.na)) |> #soil_chemical_mineral), is.na)) |>
- # filter(!(oaxaca & Sr > 0.71)) |> # remove two anomalous points from SMT
-  mutate(Sr = logit_transform(Sr))
-
-mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23),
-                       crs = 4326) |>
-  st_transform(dat)
-
-#can we keep the human data in train?
-train <- dat |>
-  mutate(mexico = lengths(st_intersects(geometry, st_as_sfc(mexico_bbox))) > 0) |>
-  filter(type != 'human' | mexico == FALSE, # is this right?
-         oaxaca == FALSE) |>
-# filter(mexico) |> # to get just mexio training data
-  select(-geometry, -mexico) # hack to move geometry to last column
-
-
-test <- dat |>
-  filter(type == 'human' | oaxaca == TRUE) |>
-  st_crop(mexico_bbox) |>
-  mutate(type2 = replace_na(type2, ''), material = replace_na(material, ''))
-
-splits <- make_splits(train, test)
-
-
-rec <- recipe(Sr ~ ., train) |> 
-  update_role(c(geometry, oaxaca, type2, material, seqnum), new_role = 'other') |>
-  update_role_requirements('other', bake = FALSE) |> 
-#    step_naomit(all_predictors(), -starts_with('soil')) |>
-  step_impute_knn(starts_with('soil')) |>
-  step_normalize(all_numeric_predictors())
-
-rec_bedrock <- rec |>
-  step_rm(starts_with('soil'), starts_with('aerosol'), starts_with('climate'))
-
-rec_nosoil <- rec |>
-  step_rm(starts_with('soil'))
-
-rec_noclimate<- rec |>
-  step_rm(starts_with('climate'))
-
-rec_noaerosol <- rec |>
-  step_rm(starts_with('aerosol'))
-
-
-prior_test <- function(coef = 0.95, expo = 2, depths = 1:10) {
-  tidyr::crossing(coef = coef, expo = expo, depth = depths) %>%
-    mutate(
-      `terminial node prior` = coef * (1 + depth)^(-expo),
-      coef = format(coef),
-      expo = format(expo))
-}
-
-prior_test(coef = c(0.65, 0.85, .95), expo = c(1, 2)) %>%
-  ggplot(aes(depth, `terminial node prior`, col = coef)) +
-  geom_line() +
-  geom_point() +
-  facet_wrap(~ expo)
-
- bart_mod <- parsnip::bart(mode = 'regression', trees = 200, #200,
-                          prior_terminal_node_coef = 0.85, #.65
-                          prior_terminal_node_expo =  1,
-                          prior_outcome_range =  13, #30
-                          ) %>%
-  set_engine('dbarts',
-             usequants = TRUE,
-           #  combinechains = FALSE, 
-             nchain = 4, 
-            nthread = 4, 
-       #     nskip = 1500,
-            nskip = 5000,
-           ndpost = 1000,
-         #   splitprobs = vp$varimps
-# nskip = 125000, ndpost = 20000, keepevery = 5
-             )
-bart_wflw <- workflow(rec, bart_mod)
-
-wflw_bedrock <- workflow(rec_bedrock, bart_mod)
-wflw_nosoil <- workflow(rec_nosoil, bart_mod)
-wflw_noclimate <- workflow(rec_noclimate, bart_mod)
-wflw_noaerosol <- workflow(rec_noaerosol, bart_mod)
-
-library(workflowsets)
-
-wflws <- workflow_set(list(full = rec, bedrock = rec_bedrock, nosoil = rec_nosoil, noclimate = rec_noclimate, noaerosol = rec_noaerosol), list(bart_mod))
-
-control <- control_resamples(
-  pkgs = 'sf'
-)
-gcpip$result
-pip |> collect_metrics()
-autoplot(pip, type = 'wflow_id')
-```
-
-prior_terminal_node_coef=0.856, prior_terminal_node_expo=1.04, prior_outcome_range=13.3 at 200 trees best by one sd is 50 trees, 0.263 coef, 1.842 exp, 36.316 outcome range best overall is 211, 0.83, 1.61, 17.78
-```{r}
-bart_last <- last_fit(wflw_noaerosol, splits)
-bart_fit <- extract_workflow(bart_last)
-collect_metrics(bart_last)
-bart_engine <- bart_fit |>
-  extract_fit_engine()
-  
-plot(bart_engine)
-```
-
-```{r}
-bart_last <- last_fit(bart_wflw, splits)
-bart_fit <- extract_workflow(bart_last)
-collect_metrics(bart_last)
-bart_engine <- bart_fit |>
-  extract_fit_engine()
-  
-plot(bart_engine)
-```
-
-```{r}
-bind_cols(
-  predict(bart_fit, test, type = 'conf_int'),
-  predict(bart_fit, test),
-test) |>
-  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
-  geom_point(aes(color = oaxaca), size = 1) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-```
-
-```{r}
-augment(bart_fit, train) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point(size = 1) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-```
-
-
-```{r}
-t(bart_engine$sigma) |>
-  as_tibble() |>
-  pivot_longer(everything()) |>
-  ggplot(aes(value, color = name)) +
-  geom_density()
-
-t(bart_engine$sigma) |>
-  as_tibble() |>
-  mutate(iter = 1:n()) |>
-  pivot_longer(-iter) |>
-  ggplot(aes(iter, value, color = name)) +
-  geom_line() +
-  facet_wrap(~name)
-
-sigma_mcmc <- t(bart_engine$sigma) |>
-  as_tibble() |>
-  map(mcmc) |>
-  mcmc.list()
-plot(sigma_mcmc)
-# Check Gelman-Rubin statistic
-gelman.diag(sigma_mcmc)
-
-# Effective sample size
-effectiveSize(sigma_mcmc)
-```
-water is more important when there are more trees?
-```{r}
-vp <- varimp(bart_engine)
-ggsave(here('outputs/figures/bart_varimp.png'), height = 4, width = 6)
-```
-
-
-```{r}
-bup <- test |>
-  filter(inverse_logit_transform(Sr) > 0.716,
-         type2 == 'Lowland Maya')
-
-# this needs to be normalized!
-extract_recipe(bart_fit) |> bake(bup) %>%
-predict(bart_engine, ., type = 'ppd') |> inverse_logit_transform() |> hist()
-```
-
-
-top right are from Cayo, sample id F4581, F4573, 4574, etc. on Chalilo reservoir on Macal River also the ones lower than that are from the same reservoir. so why does th emodel place them lower? must be an issue with the location data? but also my predcitors must do something weird there? ahh so the reservoir is immediately beyond and below the maya mountains, so we'd both get individuals who are different in both areas and uncertainty in where they're sampled!
-
-the low values that are overpredicted are likely the human samples from the forenic study!
-
-the line of low samples is from cholula
-
-should we sample predictions with 5km buffer?
-
-```{r}
-library(mapview)
-mapview(mexico_predictions) +
-  (test |>
-  bind_cols(predict(bart_fit, test)) |>
-  filter(near(inverse_logit_transform(.pred), 0.706, 0.0001)) |>
-  filter(oaxaca == FALSE) |>
-    mutate(Sr = inverse_logit_transform(Sr)) |>
-  st_jitter(100) |>
-  mapview(zcol = 'Sr'))
-```
-
-```{r}
-pip <- predict(bart_fit, test) |>
-    bind_cols(test)  |>
-  filter(inverse_logit_transform(.pred) > .708,
-         inverse_logit_transform(Sr) > .712) |>
-  st_as_sf() |>
-  st_jitter(100) #|>
-  mapview() 
-
-  
-  pop <- predict(bart_fit, test) |>
-    bind_cols(test)  |>
-  filter(inverse_logit_transform(.pred) > .7075,
-         inverse_logit_transform(Sr) < .706) |>
-  st_as_sf() |>
-  st_jitter(100) #|>
-  mapview() 
-```
-
-```{r}
-st_crop(mexico_predictions, )
-
-mapview(mexico_predictions) + mapview(pip)
-mapview(mexico_predictions) + mapview(pop) # this is where the model overpredicts
-mapview(mexico_predictions) + mapview(cambio)
-```
-
-```{r}
-mapview(dat)
-```
-
-need to check these locations for outliers, etc
-
-```{r}
-dat |> filter(oaxaca) |>
-  filter(inverse_logit_transform(Sr) > .71)
-```
-
-```{r}
-bart_final <- fit(bart_fit, bind_rows(train, test))
-
-bind_cols(
-  predict(bart_final, test, type = 'conf_int'),
-  predict(bart_final, test),
-  test
-  ) |>
-  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
-  geom_point(aes(color = oaxaca), alpha = 0.75) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-```
-
-```{r, fig.width=20}
-bart_engine$fit$plotTree(chainNum = 1, sampleNum = 200, treeNum = 2)
 ```
 
 
 # Testing on Oaxaca predictions
 
 ```{r}
-mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))
+library(bundle)
+mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))[[-c(4,6)]]
+bart_final <- readRDS(here('outputs/models/bart_final.rds')) |>
+  unbundle()
+
+mexico_predictors
 ```
 
 ```{r}
 mexico_predictions <- predict(mexico_predictors, 
-                               bart_fit, 
+                               extract_workflow(results_mexico), 
                                na.rm = TRUE, 
-                               const = tibble(type = factor('plant', levels = levels(train$type)))
+                            const = tibble(type = factor('plant', levels = levels(train$type)))
                               ) |>
   st_as_stars() |>
   inverse_logit_transform()
@@ -316,15 +50,17 @@ ggplot() +
   theme_bw()
 ```
 
+
 ```{r}
 mexico_predictions2 <- predict(mexico_predictors, 
                                bart_final, 
                                na.rm = TRUE, 
-                               const = tibble(type = factor('plant', levels = levels(train$type)))) |>
+                               const = tibble(type = factor('plant', levels = levels(train$type)))
+                              ) |>
   st_as_stars() |>
   inverse_logit_transform()
 
-plot((mexico_predictions2))
+plot(mexico_predictions2, downsample = 0)
 ```
 
 ```{r}
@@ -349,15 +85,15 @@ bedrock_model_q3 <- read_stars(here('data/raw/isotope_predictors/srsrq3.tif')) |
   st_crop(mexico_predictions)
 
 plot(bedrock_model_median, downsample = 0)
-boop <- bedrock_model_median |>
+
+bed_med <- bedrock_model_median |>
   as_tibble()
 rast(here('data/raw/isotope_predictors/rm1_reproj.tif')) |> range()
 rast(here('data/raw/isotope_predictors/srsrq1.tif')) |> range()
 
-boop
+bed_med
 st_crs(mexico_predictions)
 ```
-
 
 
 ```{r}
@@ -367,6 +103,7 @@ ggplot() +
   facet_wrap(~attributes) +
   scale_fill_viridis_c(option = 'magma', na.value = NA) +
   theme_bw()
+
 ggplot() +
   geom_stars(data = bedrock_model_median) +
    scale_fill_viridis_c(option = 'magma', na.value = NA) +
@@ -400,90 +137,17 @@ ggplot() +
   scale_fill_viridis_c(na.value = NA) +
   theme_bw() +
   coord_sf()
+
+ggplot() +
+  geom_stars(data = (mexico_predictions - mexico_predictions2) * 100 / mexico_predictions) +
+  scale_fill_scico(na.value = NA, midpoint) +
+  theme_bw() +
+  coord_sf()
 ```
 
-```{r, fig.width = 15}
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = 'magma', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = 'inferno', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = 'cividis', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = 'mako', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = 'rocket', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'vik', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'managua', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'lipari', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'batlow', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'batlowK', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'batlowW', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'acton', na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
-  geom_sf() +
-  scale_fill_scico(palette = 'berlin', na.value = NA, guide = 'legend') +
-  theme_bw()
-```
 n.threads isn't argument to internal bart predict function
 ```{r}
-mexico_confidence <- predict(mexico_predictors, bart_fit, type = 'conf_int',
+mexico_confidence <- predict(mexico_predictors,  extract_workflow(results_mexico), type = 'conf_int',
                               na.rm = TRUE, const = tibble(type = factor('plant', levels = levels(train$type)))
 ) |>
   st_as_stars() |>
@@ -504,6 +168,7 @@ plot(mexico_confidence2, downsample = 0)
 plot(mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence[,,,1, drop = TRUE], downsample = 0)
 ```
 
+Plot everything
 ```{r}
 ggplot() +
   geom_stars(data = (mexico_confidence[,,,2, drop = TRUE])) +
@@ -546,19 +211,31 @@ ggplot() +
   theme_bw()
 ```
 
-```{r}
-library(scico)
 
+Final predictions all together.
+```{r}
+predictions <- c(c(mexico_predictions, mexico_predictions2, along = 'version'),
+c(split(mexico_confidence), split(mexico_confidence2), along = 'version'))
+
+saveRDS(predictions, here('data/derived/predictions.rds'))
+plot(predictions)
+
+ggplot() +
+  geom_stars(data = merge(predictions)) +
+  scale_fill_viridis_c(na.value = NA) +
+  facet_grid(attributes~version) +
+  theme_bw()
 ```
 
-
-
 ```{r}
-plot(mexico_predictors[[1:16]])
+montealban
+ggplot() +
+  geom_stars(data = predictions[,,,2] |> st_crop(st_buffer(st_as_sf(montealban), 100000))) +
+  scale_fill_distiller(palette = 'Spectral', na.value = NA) +
+  geom_sf(data = montealban[1,]$geometry, color = 'red') +
+  theme_bw()
 
-plot(mexico_predictors[[17:32]])
-
-plot(mexico_predictors[[33:49]])
+plot(predictions[,,,2] |> st_crop(st_buffer(st_as_sf(montealban), 100000)), col = brewer_pal(palette = 'Spectral', direction = -1)(10))
 ```
 
 ```{r}
@@ -567,17 +244,6 @@ mapview::mapview(mexico_predictions2) + mapview::mapview(train |> mutate(Sr = ex
 ```
 
 ```{r fig.width=20}
-eck4 <- st_crs(mexico_predictors)
-mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
-  st_transform(eck4) 
-mexico <- ne_countries(scale = 'medium') |>
-  st_transform(eck4) |>
-  st_crop(mexico_bbox)
-
-mexico <- ne_states('mexico') |>
-  st_transform(eck4) |>
-  st_crop(mexico_bbox)
-  
 ggplot() +
   #geom_sf(data = mexico, fill = 'black', color = NA) +
   geom_stars(data = mexico_predictions2 |> setNames('Sr')) +
@@ -601,7 +267,7 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave('mesoamerica_iscoscape.png', width = 10, height = 6.4)
+ggsave(here('outputs/figures/mesoamerica_iscoscape.png'), width = 10, height = 6.4)
 ```
 
 ```{r fig.width=20}
@@ -633,9 +299,8 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave('mesoamerica_iscoscape_uncertainty.png', width = 10, height = 6.4)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_uncertainty.png'), width = 10, height = 6.4)
 ```
-
 
 
 ```{r fig.width=10, fig.asp =1}
@@ -660,23 +325,18 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave('mesoamerica_iscoscape_range.png', width = 10, height = 10)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_range.png'), width = 10, height = 10)
 ```
 
 ```{r fig.width=10}
-oaxaca <- mexico |>
-  filter(name == 'Oaxaca') |>
-  st_transform(st_crs(mexico_predictions2))
-oaxaca2 <- mexico |>
-  filter(name == 'Oaxaca')
-
 ggplot() +
   geom_sf(data = mexico |> st_crop(oaxaca2 |> st_buffer(20000)), fill = 'lightgrey', color = NA) +
   geom_stars(data = st_crop(mexico_predictions2, st_bbox(oaxaca |> st_buffer(20000))) |> setNames('Sr'), alpha = 0.5) +
   geom_stars(data = st_crop(mexico_predictions2, oaxaca) |> setNames('Sr')) +
   #geom_sf(data = mexico, fill = NA, color = 'white') +
     geom_sf(data = oaxaca, fill = NA, linewidth = 1, color = 'white') +
-  
+  geom_sf(data = filter(dat, oaxaca), color = 'white') +
+    geom_sf(data = dat |> filter(type == 'human') |> st_filter(oaxaca2), color = 'red') +
   coord_sf(expand = FALSE) +
   scale_fill_scico(palette = 'lipari', na.value = NA) +
   theme_bw() +
@@ -695,7 +355,7 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave('oaxaca_isoscape_bart.png', width = 10, height = 6.4)
+ggsave(here('outputs/figures/oaxaca_isoscape_bart.png'), width = 10, height = 6.4)
 ```
 
 
