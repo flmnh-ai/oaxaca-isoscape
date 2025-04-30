@@ -23,18 +23,18 @@ library(dggridR)
 source(here('R/helpers.R'))
 ```
 
-## Preprocess Global Raster Predictors
+## Global Raster Predictors
 
 ### Bedrock isotope predictors
 
 Get the list of predictor files and names produced from the original analysis by Bataille et al. (2020).
 
 ```{r}
-pred_files <- '../data/raw/isotope_predictors' |>
+pred_files <- here('data/raw/isotope_predictors') |>
   list.files(pattern = '\\.tif$', full.names = TRUE)
 
 pred_names <- pred_files |>
-  str_remove('../data/raw/isotope_predictors/') |>
+  str_split_i('/', 11) |>
   str_remove('\\.tif$') |>
   str_remove('_reproj') |>
   str_remove('r\\.')
@@ -49,27 +49,34 @@ sediment_tibble <- tibble(
 Some of the variables have slightly different origins and extents, so we need to process them step by step before combining them.
 
 ```{r}
-vars1 <- rast(pred_files[c(4, 14, 15, 18)])
-names(vars1) <- pred_names[c(4, 14, 15, 18)]
+vars1 <- rast(pred_files[c(4:7)])
+names(vars1) <- pred_names[c(4:7)]
 levels(vars1[[2]]) <- sediment_tibble
 names(vars1[[2]]) <- 'sediment'
+names(vars1[[4]]) <- 'sr_median'
 
-vars2 <- rast(pred_files[c(1,2,3,20,21)])
+vars2 <- rast(pred_files[c(1:3, 8:9)])
 crs(vars2) <- crs(vars1)
-names(vars2) <- pred_names[c(1,2,3,20,21)]
+names(vars2) <- pred_names[c(1:3, 8:9)]
 
 predictors <- c(vars1, vars2)
-bedrock_predictors <- predictors[[4:9]]
+bedrock <- predictors[[4:9]]
 other_predictors <- predictors[[1:3]]
+```
 
-bedrock_pcs <- prcomp(bedrock_predictors, scale. = TRUE, maxcell = 10000000, retx = FALSE)
-bedrock_pc_names <- c("bedrock_age_sr_gradient", "bedrock_young_highSrVar"#, "bedrock_ageRange_SrContrast"
+Calculate the leading principal components of the bedrock predictors.
+```{r}
+bedrock_pcs <- prcomp(bedrock, scale. = TRUE, maxcell = 10000000, retx = FALSE)
+bedrock_pcs
+
+bedrock_pc_names <- c("bedrock_age_sr_gradient", 
+                      "bedrock_young_highSrVar"#, "bedrock_ageRange_SrContrast"
                       )
 ```
 
 ### Soil
 
-Soilgrids 250m, already aggregated to 1km.
+Do the same processing to Soilgrids 250m, already aggregated to 1km from here: https://files.isric.org/soilgrids/latest/data_aggregated/1000m/.
 
 ```{r}
 soils <- here('data/raw/soilgrids') |>
@@ -80,6 +87,7 @@ names(soils) <- names(soils) |>
   str_replace('-', '_')
 
 soil_pcs <- prcomp(soils, scale. = TRUE, maxcell = 10000000, retx = FALSE)
+soil_pcs
 
 soil_pc_names <- c(
   "soil_moisture_and_bulk_density",  # PC1: High phh2o and moderate bulk density; contrast with clay
@@ -93,12 +101,16 @@ soil_pc_names <- c(
 ```
 
 ### Elevation
+
+Get SRTM elevation data from the `geodata` package.
 ```{r}
 elevation <- geodata::elevation_global(0.5, path = here('data/raw'))
 names(elevation) <- 'elevation'
 ```
 
 ### Climate
+
+Get climate data from CHELSA V2.1.
 ```{r}
 # climate data
 climate <- list.files(here('data/raw/CHELSA_V2_bio_clim'), full.names = TRUE) |>
@@ -111,6 +123,7 @@ names(climate) <- names(climate) |>
   str_remove('_V.2.1')
 
 climate_pcs <- prcomp(climate, scale. = TRUE, maxcell = 10000000, retx = FALSE)
+climate_pcs
 
 climate_pc_names <- c(
   "climate_temp_dryness_gradient",      # PC1: Captures the overall temperature–dryness gradient.
@@ -124,7 +137,9 @@ climate_pc_names <- c(
 ```
 
 ### Aerosol Deposition
+
 Dry and wet aerosol deposition from MERRA-2. Run `R/aerosol_deposition.R` first to get the data ready.
+
 ```{r}
 aerosols_stars <- readRDS(here('data/derived/aerosols.rds'))
   
@@ -132,6 +147,7 @@ aerosols <- rast(aerosols_stars)
 names(aerosols) <- names(aerosols_stars)
 
 aerosol_pcs <- prcomp(aerosols, scale. = TRUE, maxcell = 10000000, retx = FALSE)
+aerosol_pcs
 
 aerosol_pc_names <- c(
   "aerosol_carbonaceous_sulfate_abundance",     # Overall loading of carbon and sulfate species, representing total anthropogenic pollution
@@ -142,31 +158,12 @@ aerosol_pc_names <- c(
 )
 ```
 
-### Pyroclastic Deposits
-Get the extra pyroclastic layer from GUM
-```{r}
-sf_use_s2(FALSE)
-gum_pyroclastic <- read_sf('~/Downloads/Boerker_et_al_GUM_v1.0/GUM_pyroclastics/GUM_pyroclastics.shp') |>
-  st_union() |>
-  st_as_sf() |>
-  st_transform(eck4)
-sf_use_s2(FALSE)
-```
-
-### Fertilizer application
-```{r}
-fertilizer <- rast(c('~/Downloads/NFertilizer_global_geotif/nfertilizer_global.tif',
-              '~/Downloads/PFertilizer_global_geotif/pfertilizer_global.tif')) |>
-  setNames(c('nitrogen', 'phosphorus')) |>
-  subst(NA, 0)
-```
-
-
 ## Mexico Predictor Data
 
 This is too much data to keep in memory. Because we're only making spatial predictions for Mexico, we'll crop the predictors to the bounding box of Mexico so we can work with a smaller dataset.
 
-Define a function to fill gaps in the rasters.
+Define a function to progressively fill gaps in the rasters.
+
 ```{r}
 fillNA <- function(x, method = 'mean') {
   focal(x, w = 3, fun = method, na.policy = 'only', na.rm = TRUE) |>
@@ -180,11 +177,12 @@ fillNA <- function(x, method = 'mean') {
 }
 ```
 
+Create the in-memory predictor rasters for Mexico and Central America
 ```{r}
 mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
   st_transform(eck4) 
 
-mexico_bedrock <- crop(bedrock_predictors, mexico_bbox) |>
+mexico_bedrock <- crop(bedrock, mexico_bbox) |>
   fillNA(method = 'modal') |>
   predict(bedrock_pcs, index = 1:2, cores = 4)
 names(mexico_bedrock) <- bedrock_pc_names
@@ -208,28 +206,15 @@ mexico_aerosols <- crop(aerosols, st_transform(mexico_bbox, 4326), snap = 'out')
   project(mexico_other, method = 'cubicspline')
 names(mexico_aerosols) <- aerosol_pc_names
 
-mexico_fertilizer <- crop(fertilizer, st_transform(mexico_bbox, 4326), snap = 'out') |>
-  project(mexico_other, method = 'cubicspline')
-
 mexico_elevation <- crop(elevation, st_transform(mexico_bbox, 4326)) |> 
   project(mexico_other)
 
-template <- is.na(mexico_climate[["climate_temp_dryness_gradient"]]) |>
-  mask(mexico_climate[["climate_temp_dryness_gradient"]]) |>
-  st_as_stars()
-
-mexico_pyroclastic <- gum_pyroclastic |>
-  st_rasterize(template) |>
-  setNames('pyroclastic') |>
-  rast()
-
-mexico_predictors <- c(mexico_bedrock, mexico_other, mexico_pyroclastic, mexico_aerosols, mexico_climate, mexico_soils, mexico_elevation, mexico_fertilizer) %>%
-  mask(., .[[15]])
-
-names(mexico_predictors)
+# combine everything and mask out ocean pixels
+mexico_predictors <- c(mexico_bedrock, mexico_other, mexico_aerosols, mexico_climate, mexico_soils, mexico_elevation) %>%
+  mask(., .[[14]])
 ```
 
-
+Check the rasters to make sure they look correct.
 ```{r}
 plot(mexico_bedrock)
 plot(mexico_aerosols)
@@ -245,16 +230,13 @@ plot(mexico_predictors[[13:24]])
 ```
 
 Save the Mexico predictors to disk so we don't have to reprocess them each time.
-
 ```{r}
 saveRDS(mexico_predictors, here('data/derived/mexico_predictors.rds'))
-writeRaster(mexico_predictors, here('data/derived/mexico_predictors.tif'), overwrite = TRUE)
-mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))
 ```
 
 ## Global Isotope Observations
 
-Now we'll load the global isotope observations from Bataille et al. (2020) and filter them to only include the types of samples we're interested in (animals, plants, soil, and water) and remove any samples with Sr isotope ratios greater than 0.75 (to remove any outliers that might be due to contamination or other issues). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
+Now we'll load the global isotope observations and filter them to only include the types of samples we're interested in (animals, plants, soil, and water) and remove any samples with Sr isotope ratios greater than 0.78 (to remove any outliers that might be due to contamination or other issues). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
 
 ```{r}
 pts1 <- here('data/raw/facets-2024-0180supplb.xlsx') |>
@@ -320,15 +302,9 @@ pts <- bind_rows(pts1, pts2, water, humans) |>
   mutate(oaxaca = FALSE)
 ```
 
-```{r}
-library(mapview)
-mapview(pts3 |> st_jitter(500) |> filter(Source.of.data.reference.ID == 45), zcol = 'Sr')
-mapview(pts1, color = 'yellow') + mapview(pts2, color = 'green') + mapview(pts3 |> filter(type == 'human') |> st_jitter(500), color = 'orange') + mapview(cambio |> st_jitter(500), color = 'red') + mapview(pts35, color = 'purple')
-```
-
 #### Preprocess Oaxaca Isotope Observations
 
-Now we'll load the Oaxaca isotope observations and filter them to only include the types of samples we're interested in (plants) and remove any samples with Sr isotope ratios greater than 0.78 (to remove any outliers that might be due to contamination or other issues). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
+Now we'll load the Oaxaca isotope observations and remove any samples with Sr isotope ratios greater than 0.71 (to remove any outliers that might be due to contamination or other issues at the San Martin Tilcajete site). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
 
 ```{r}
 oaxaca_plants <- read_excel(here('data/raw/OAX Sr Result Table.xlsx')) %>%
@@ -339,11 +315,8 @@ oaxaca_plants <- read_excel(here('data/raw/OAX Sr Result Table.xlsx')) %>%
   #filter(Locality != 'San Martin Tilcajete')
   filter(Sr < 0.71)
 
-plot(oaxaca_plants)
 ggplot(oaxaca_plants, aes(Locality, Sr)) +
   geom_point()
-
-mapview::mapview(oaxaca_plants |> st_jitter(500), zcol = 'Sr')
 
 pts_combined <- oaxaca_plants |>
   select(Sr) |>
@@ -353,29 +326,26 @@ pts_combined <- oaxaca_plants |>
   filter(between(Sr, .703, .78))
 ```
 
+Save the final result with the spatial points for all isotope observations.
 ```{r}
 saveRDS(pts_combined, here('data/derived/pts_combined.rds'))
 ```
 
-```{r}
-pts_combined <- readRDS(here('data/derived/pts_combined.rds'))
-```
-
+Plot the result.
 ```{r}
 mapview::mapview(pts_combined, zcol = 'type')
 ```
 
-
 ## Final Data for Modeling
+Now we'll extract the predictor values for each point in the dataset. We'll use the `terra::extract()` function to extract the values from the rasters and combine them with the points.
 
 ```{r}
 elevation_extract <- terra::extract(elevation, 
                                     st_transform(pts_combined, 4326), 
                                     ID = FALSE, 
                                     search_radius = 5000,
-                                    #  cell = TRUE,
                                     na.rm = TRUE) |>
-  select(elevation)#, cell)
+  select(elevation)
 
 extract_fun <- function(x, rast, crs = 4326){
   terra::extract(rast[[x]], st_transform(pts_combined, crs = crs), 
@@ -406,8 +376,7 @@ aerosol_extract <- terra::extract(aerosols,
   as_tibble() |>
   setNames(aerosol_pc_names)
 
-
-bedrock_extract <- map_dfc(1:nlyr(bedrock_predictors), extract_fun, bedrock_predictors, eck4) %>%
+bedrock_extract <- map_dfc(1:nlyr(bedrock), extract_fun, bedrock, eck4) %>%
   predict(bedrock_pcs, .) %>%
   .[,1:2] |>
   as_tibble() |>
@@ -415,29 +384,9 @@ bedrock_extract <- map_dfc(1:nlyr(bedrock_predictors), extract_fun, bedrock_pred
 
 other_predictors[['sediment']]  <- as.int(other_predictors[['sediment']]) #dunno why this is necessary!
 other_extract <-  map_dfc(1:nlyr(other_predictors), extract_fun, other_predictors, eck4) 
-
-fertilizer_extract <- terra::extract(fertilizer, 
-                                  st_transform(pts_combined, 4326), 
-                                  ID = FALSE, 
-                                  method = 'bicubic', 
-                                  na.rm = TRUE)
 ```
 
-```{r}
-plot(other_predictors['sediment'] |> crop(st_bbox(oaxaca_plants)))
-```
-
-
-```{r}
-mapview::mapview(dat, zcol = 'sediment')
-plot(mexico_predictors['sediment'])
-mapview::mapview(mexico_predictors['sediment']) + mapview::mapview(dat, zcol = 'sediment')
-
-mapview::mapview(mexico_other['basement_age'])
-
-plot()
-```
-
+Combine all the extracted data into a single dataframe.
 ```{r}
 dat <- pts_combined |> 
   bind_cols(bedrock_extract) |>
@@ -446,31 +395,10 @@ dat <- pts_combined |>
   bind_cols(elevation_extract) |> 
   bind_cols(other_extract) |>
   bind_cols(soils_extract) |>
-  bind_cols(fertilizer_extract) |>
-  mutate(pyroclastic = st_intersects(pts_combined, gum_pyroclastic, sparse = FALSE)[,1]
-) |>
   mutate(type = factor(type)) |>
   mutate(elevation = as.numeric(elevation)) |>
   mutate(sediment = factor(sediment, labels = sediment_tibble$category[1:10])) |>
   select(-geometry) # hack to move to last column
-  # group_by(cell) %>%
-  # mutate(
-  #   n_points = n(),
-  #   median_sr = median(Sr, na.rm = TRUE),
-  #   mad_sr = median(abs(Sr - median_sr), na.rm = TRUE),
-  #   # Only calculate thresholds and flag outliers if enough points
-  #   threshold = if_else(n_points >= 5,
-  #     case_when(
-  #       median_sr < 0.710 ~ min(3 * mad_sr, 0.0008),
-  #       TRUE ~ min(3 * mad_sr, 0.0036)
-  #     ),
-  #     NA_real_
-  #   ),
-  #   is_outlier = if_else(!is.na(threshold), abs(Sr - median_sr) > threshold, FALSE)
-  # ) %>%
-  # ungroup() |>
-  # select(-c(n_points, median_sr, mad_sr, threshold, cell))
-#select(-cell)
 ```
 
 ### Spatial binning
@@ -496,12 +424,13 @@ ggplot() +
 ```
 
 Save the final result.
+
 ```{r}
 saveRDS(dat, here('data/derived/dat.rds'))
 ```
 
-
 ### Visualizations
+
 Visualize the results. What's the distribution of global Sr values? What's the distribution of sample types?
 
 ```{r, fig.width=10, fig.height=8}
@@ -544,7 +473,7 @@ e <- st_crop(pts_combined, mexico_bbox) |>
   arrange(Sr) |>
   ggplot() +
   geom_sf(data = mexico, color = 'lightgrey') +
-  # geom_sf(data = iso, color = 'red') +
+  geom_sf(data = iso, color = 'red') +
   geom_sf(aes(color = Sr)) +
   scale_color_viridis_c() +
   theme_minimal()
@@ -571,4 +500,3 @@ e / (f + (g / h) + plot_layout(widths = c(2,.7))) + plot_annotation(tag_levels =
 
 #ggsave('data_mexico.png', width = 8, height = 8)
 ```
-
