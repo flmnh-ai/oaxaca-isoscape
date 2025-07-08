@@ -218,6 +218,7 @@ predictions <- c(c(mexico_predictions, mexico_predictions2, along = 'version'),
 c(split(mexico_confidence), split(mexico_confidence2), along = 'version'))
 
 saveRDS(predictions, here('data/derived/predictions.rds'))
+predictions <- readRDS(here('data/derived/predictions.rds'))
 plot(predictions)
 
 ggplot() +
@@ -242,15 +243,26 @@ plot(predictions[,,,2] |> st_crop(st_buffer(st_as_sf(montealban), 100000)), col 
 mapview::mapview(mexico_predictions2) + mapview::mapview(test |> mutate(Sr = exp(Sr)), zcol = 'Sr')
 mapview::mapview(mexico_predictions2) + mapview::mapview(train |> mutate(Sr = exp(Sr)), zcol = 'Sr')
 ```
+```{r}
+mexico <- ne_states('mexico') |>
+  st_transform(eck4) |>
+  st_crop(mexico_bbox)
+oaxaca <- mexico |>
+  filter(name == 'Oaxaca') |>
+  st_transform(st_crs(predictions))
+oaxaca2 <- mexico |>
+  filter(name == 'Oaxaca')
+```
 
 ```{r fig.width=20}
 ggplot() +
   #geom_sf(data = mexico, fill = 'black', color = NA) +
-  geom_stars(data = mexico_predictions2 |> setNames('Sr')) +
+  #geom_stars(data = mexico_predictions2 |> setNames('87Sr/86Sr')) +
+  geom_stars(data = predictions[1,,,2]) +
   geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
   #  geom_sf(data = mexico, fill = NA, color = 'white') +
   coord_sf(expand = FALSE) +
-  scale_fill_scico(palette = 'lipari', na.value = NA) +
+  scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
   theme_bw() +
   theme(
     panel.background = element_rect(fill = "lightblue"),
@@ -267,7 +279,7 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/mesoamerica_iscoscape.png'), width = 10, height = 6.4)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_v2.png'), width = 10, height = 6.4)
 ```
 
 ```{r fig.width=20}
@@ -279,10 +291,11 @@ ggplot() +
   theme_bw()
 
 ggplot() +
-  geom_stars(data = (mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence2[,,,1, drop = TRUE]) |> setNames('CI')) +
+ # geom_stars(data = (mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence2[,,,1, drop = TRUE]) |> setNames('CI')) +
+  geom_stars(data = (predictions[3,,,2, drop = TRUE] - predictions[2,,,2, drop = TRUE]) |> setNames('CI')) +
   geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
   coord_sf(expand = FALSE) +
-  scale_fill_scico(palette = 'turku', na.value = NA) +
+  scale_fill_scico(palette = 'turku', na.value = NA, name = expression("CI ("^"87" * "Sr/" * ""^"86" * ")" * "Sr")) +
   theme_bw() +
   theme(
     panel.background = element_rect(fill = "lightblue"),
@@ -299,23 +312,24 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/mesoamerica_iscoscape_uncertainty.png'), width = 10, height = 6.4)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_uncertainty_v2.png'), width = 10, height = 6.4)
 ```
 
 
 ```{r fig.width=10, fig.asp =1}
 ggplot() +
-  geom_stars(data = mexico_confidence2 |> setNames('Sr')) +
+  #geom_stars(data = mexico_confidence2 |> setNames('87Sr/86Sr')) +
+  geom_stars(data = merge(predictions[2:3, , , 2, .drop = TRUE] |> setNames(c('Lower', 'Upper')))) +
   geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
   coord_sf(expand = FALSE) +
-  scale_fill_scico(palette = 'lipari', na.value = NA) +
+  scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
   theme_bw() +
   theme(
     panel.background = element_rect(fill = "lightblue"),
     panel.grid.major = element_line(color = "white", linewidth = 0.5),
         plot.margin = margin(0, 0, 0, 0)) +
   labs(x = '', y = '') + 
-  facet_wrap(~band, nrow = 2) +
+  facet_wrap(~attributes, nrow = 2) +
   ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
   ggspatial::annotation_north_arrow(
     location = "bl", 
@@ -325,20 +339,21 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/mesoamerica_iscoscape_range.png'), width = 10, height = 10)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_range_v2.png'), width = 10, height = 10)
 ```
 
 ```{r fig.width=10}
 ggplot() +
   geom_sf(data = mexico |> st_crop(oaxaca2 |> st_buffer(20000)), fill = 'lightgrey', color = NA) +
-  geom_stars(data = st_crop(mexico_predictions2, st_bbox(oaxaca |> st_buffer(20000))) |> setNames('Sr'), alpha = 0.5) +
-  geom_stars(data = st_crop(mexico_predictions2, oaxaca) |> setNames('Sr')) +
+  geom_stars(data = st_crop(predictions[1,,,2], st_bbox(oaxaca |> st_buffer(20000))) |> setNames('Sr'), alpha = 0.5) +
+  #geom_stars(data = st_crop(mexico_predictions2, oaxaca) |> setNames('87Sr/86Sr')) +
+  geom_stars(data = st_crop(predictions[1,,,2], oaxaca)|> setNames('Sr')) +
   #geom_sf(data = mexico, fill = NA, color = 'white') +
     geom_sf(data = oaxaca, fill = NA, linewidth = 1, color = 'white') +
   geom_sf(data = filter(dat, oaxaca), color = 'white') +
     geom_sf(data = dat |> filter(type == 'human') |> st_filter(oaxaca2), color = 'red') +
   coord_sf(expand = FALSE) +
-  scale_fill_scico(palette = 'lipari', na.value = NA) +
+  scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
   theme_bw() +
   theme(
     panel.background = element_rect(fill = "lightblue"),
@@ -355,7 +370,7 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/oaxaca_isoscape_bart.png'), width = 10, height = 6.4)
+ggsave(here('outputs/figures/oaxaca_isoscape_bart_v2.png'), width = 10, height = 6.4)
 ```
 
 
