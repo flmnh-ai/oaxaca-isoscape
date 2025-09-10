@@ -40,7 +40,7 @@ dat <- readRDS(here('data/derived/dat.rds')) |>
   mutate(Sr = logit_transform(Sr)) |>
   mutate(mexico = lengths(st_intersects(geometry, st_as_sfc(mexico_bbox))) > 0) |>
   st_crop(train_bbox) |>
-  select(-c(starts_with('sediment'), nitrogen, phosphorus, pyroclastic))
+  select(-c(starts_with('sediment')))#, nitrogen, phosphorus, pyroclastic))
   
 train <- dat |>
   filter(!mexico) |>
@@ -67,8 +67,8 @@ mapview::mapview(train) + mapview::mapview(test, color = 'red')
 splits <- make_splits(train, test)
 splits_oaxaca <- make_splits(bind_rows(train, filter(test, !oaxaca)), filter(test, oaxaca))
 splits_mexico <- make_splits(train, filter(test, !oaxaca))
-# calculate cv folds
 
+# calculate cv folds
 mexico_folds <- manual_rset(list(splits_mexico,  # 5 replications
                                  splits_mexico, 
                                  splits_mexico, 
@@ -227,6 +227,8 @@ extract_workflow(results_oaxaca) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
 ```
+
+
 
 ```{r}
 bart_final |>
