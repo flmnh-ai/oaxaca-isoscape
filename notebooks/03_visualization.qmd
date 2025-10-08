@@ -15,54 +15,33 @@ library(terra)
 library(here)
 source(here('R/helpers.R'))
 library(scico)
+library(bundle)
 ```
 
 # Testing on Oaxaca predictions
 
 ```{r}
-library(bundle)
-mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))[[-c(4,6)]]
+mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))[[-4]] # removes sediment
+
 bart_final <- readRDS(here('outputs/models/bart_final.rds')) |>
   unbundle()
-
-mexico_predictors
 ```
 
+
 ```{r}
+set.seed(42)
 mexico_predictions <- predict(mexico_predictors, 
-                               extract_workflow(results_mexico), 
-                               na.rm = TRUE, 
-                            const = tibble(type = factor('plant', levels = levels(train$type)))
-                              ) |>
-  st_as_stars() |>
-  inverse_logit_transform()
-
-plot(mexico_predictions, downsample = 0)
-```
-
-```{r}
-ggplot() +
-  geom_stars(data = (mexico_predictions)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = 'magma', na.value = NA) +
-  theme_bw()
-```
-
-```{r}
-mexico_predictions2 <- predict(mexico_predictors, 
                                bart_final, 
-                               na.rm = TRUE, 
-                               const = tibble(type = factor('plant', levels = levels(train$type)))
+                               na.rm = TRUE
                               ) |>
   st_as_stars() |>
   inverse_logit_transform()
-
 plot(mexico_predictions2, downsample = 0)
 ```
 
 ```{r}
 ggplot() +
-  geom_stars(data = (mexico_predictions2)) +
+  geom_stars(data = (mexico_predictions)) +
   geom_sf() +
   scale_fill_viridis_c(option = 'magma', na.value = NA) +
   theme_bw()
@@ -92,7 +71,7 @@ st_crs(mexico_predictions)
 
 ```{r}
 ggplot() +
-  geom_stars(data = merge(c(mexico_predictions, mexico_predictions2)) |> setNames('Sr')) +
+  geom_stars(data = merge(c(mexico_predictions, mexico_predictions)) |> setNames('Sr')) +
   coord_sf() +
   facet_wrap(~attributes) +
   scale_fill_viridis_c(option = 'magma', na.value = NA) +
@@ -111,39 +90,20 @@ ggplot() +
   coord_sf()
 
 ggplot() +
-  geom_stars(data = mexico_predictions2) +
+  geom_stars(data = mexico_predictions) +
   coord_sf() +
   scale_fill_viridis_c(option = 'magma', na.value = NA) +
   theme_bw()
 ```
 
-```{r fig.width=20}
-ggplot() +
-  geom_stars(data = mexico_predictions - mexico_predictions2) +
-  scico::scale_fill_scico(palette = 'vik', na.value = NA, midpoint = 0) +
-  theme_bw() +
-  coord_sf()
-```
 
-```{r, fig.width=20}
-ggplot() +
-  geom_stars(data = abs(mexico_predictions - mexico_predictions2) * 100 / mexico_predictions) +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw() +
-  coord_sf()
-
-ggplot() +
-  geom_stars(data = (mexico_predictions - mexico_predictions2) * 100 / mexico_predictions) +
-  scale_fill_scico(na.value = NA, midpoint) +
-  theme_bw() +
-  coord_sf()
-```
 
 n.threads isn't argument to internal bart predict function
 
 ```{r}
-mexico_confidence <- predict(mexico_predictors,  extract_workflow(results_mexico), type = 'conf_int',
-                              na.rm = TRUE, const = tibble(type = factor('plant', levels = levels(train$type)))
+set.seed(42)
+mexico_confidence <- predict(mexico_predictors, bart_final, type = 'conf_int',
+                              na.rm = TRUE
 ) |>
   st_as_stars() |>
   inverse_logit_transform()
@@ -151,67 +111,14 @@ mexico_confidence <- predict(mexico_predictors,  extract_workflow(results_mexico
 
 plot(mexico_confidence, downsample = 0)
 plot(mexico_confidence[,,,2, drop = TRUE] - mexico_confidence[,,,1, drop = TRUE], downsample = 0)
-
-mexico_confidence2 <- predict(mexico_predictors, bart_final, type = 'conf_int',
-                              na.rm = TRUE, const = tibble(type = factor('plant', levels = levels(train$type)))
-) |>
-  st_as_stars() |>
-  inverse_logit_transform()
-
-
-plot(mexico_confidence2, downsample = 0)
-plot(mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence[,,,1, drop = TRUE], downsample = 0)
 ```
 
-Plot everything
-
-```{r}
-ggplot() +
-  geom_stars(data = (mexico_confidence[,,,2, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw()
-ggplot() +
-  geom_stars(data = (mexico_confidence2[,,,2, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw()
-
-
-ggplot() +
-  geom_stars(data = (mexico_confidence[,,,1, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw()
-ggplot() +
-  geom_stars(data = (mexico_confidence2[,,,1, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_confidence[,,,2, drop = TRUE] - mexico_confidence[,,,1, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw()
-ggplot() +
-  geom_stars(data = (mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence2[,,,1, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_viridis_c(na.value = NA) +
-  theme_bw()
-
-ggplot() +
-  geom_stars(data = (mexico_confidence[,,,2, drop = TRUE] - mexico_confidence[,,,1, drop = TRUE]) - (mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence2[,,,1, drop = TRUE])) +
-  geom_sf() +
-  scale_fill_scico(palette = 'vik', midpoint = 0, na.value = NA) +
-  theme_bw()
-```
 
 Final predictions all together.
 
 ```{r}
-predictions <- c(c(mexico_predictions, mexico_predictions2, along = 'version'),
-c(split(mexico_confidence), split(mexico_confidence2), along = 'version'))
+predictions <- c(mexico_predictions, split(mexico_confidence))
+
 
 saveRDS(predictions, here('data/derived/predictions.rds'))
 predictions <- readRDS(here('data/derived/predictions.rds'))
@@ -220,37 +127,20 @@ plot(predictions)
 ggplot() +
   geom_stars(data = merge(predictions)) +
   scale_fill_viridis_c(na.value = NA) +
-  facet_grid(attributes~version) +
+  facet_wrap(~attributes) +
   theme_bw()
 ```
 
-```{r}
-montealban
-ggplot() +
-  geom_stars(data = predictions[,,,2] |> st_crop(st_buffer(st_as_sf(montealban), 100000))) +
-  scale_fill_distiller(palette = 'Spectral', na.value = NA) +
-  geom_sf(data = montealban[1,]$geometry, color = 'red') +
-  theme_bw()
-
-plot(predictions[,,,2] |> st_crop(st_buffer(st_as_sf(montealban), 100000)), col = brewer_pal(palette = 'Spectral', direction = -1)(10))
-```
-
-```{r}
-mapview::mapview(mexico_predictions2) + mapview::mapview(test |> mutate(Sr = exp(Sr)), zcol = 'Sr')
-mapview::mapview(mexico_predictions2) + mapview::mapview(train |> mutate(Sr = exp(Sr)), zcol = 'Sr')
-```
-
-```{r}
-predictions
-```
 
 ```{r}
 #mexico <- ne_countries(scale = 'medium') |>
 #  st_transform(eck4) |>
 #  st_crop(mexico_bbox)
-
+albers <- '+proj=aea +lon_0=-96 +lat_1=16.5 +lat_2=21.5 +lat_0=19 +datum=WGS84 +units=m +no_defs'
+mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
+  st_transform(albers) 
 mexico <- ne_states('mexico') |>
-  st_transform(eck4) |>
+  st_transform(albers) |>
   st_crop(mexico_bbox)
 #which?
 world <- ne_countries() |>
@@ -265,12 +155,57 @@ oaxaca2 <- mexico |>
 ```
 
 ```{r fig.width=20}
+crs_lcc <- "+proj=lcc +lat_1=16 +lat_2=20 +lat_0=18 +lon_0=-95.5 +datum=WGS84 +units=m"
 ggplot() +
-  #geom_sf(data = mexico, fill = 'black', color = NA) +
-  #geom_stars(data = mexico_predictions2 |> setNames('87Sr/86Sr')) +
-  geom_stars(data = predictions[1,,,2]) +
+  geom_stars(data = predictions[1,,]) +
   geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
-  #  geom_sf(data = mexico, fill = NA, color = 'white') +
+  coord_sf(expand = FALSE) +
+  scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "lightblue"),
+    panel.grid.major = element_line(color = "white", linewidth = 0.5),
+        plot.margin = margin(0, 0, 0, 0)
+  ) +
+  labs(x = '', y = '') + 
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
+  ggspatial::annotation_north_arrow(
+    location = "bl", 
+    which_north = "true",
+    pad_x = unit(0.2, "in"), 
+    pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_fancy_orienteering
+  )
+```
+
+```{r fig.width=20}
+crs_lcc <- "+proj=lcc +lat_1=16 +lat_2=20 +lat_0=18 +lon_0=-95.5 +datum=WGS84 +units=m"
+ggplot() +
+  geom_stars(data = predictions[1,,] |> st_transform(crs = 32615)) +
+  geom_sf(data = mexico |> st_transform(crs = 32615), fill = NA, linewidth = .1, color = 'white') +
+  coord_sf(expand = FALSE, crs = 32615) +
+  scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "lightblue"),
+    panel.grid.major = element_line(color = "white", linewidth = 0.5),
+        plot.margin = margin(0, 0, 0, 0)
+  ) +
+  labs(x = '', y = '') + 
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
+  ggspatial::annotation_north_arrow(
+    location = "bl", 
+    which_north = "true",
+    pad_x = unit(0.2, "in"), 
+    pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_fancy_orienteering
+  )
+```
+
+```{r fig.width=20, fig.asp = .45}
+ggplot() +
+  geom_stars(data = predictions[1,,]) +
+  geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
   coord_sf(expand = FALSE) +
   scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
   theme_bw() +
@@ -289,20 +224,12 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/mesoamerica_iscoscape_v2.png'), width = 10, height = 6.4)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_v5.png'), width = 10, height = 6.4)
 ```
 
-```{r fig.width=20}
+```{r fig.width=20, fig.asp = .45}
 ggplot() +
-  geom_stars(data = mexico_confidence2) +
-  geom_sf() +
-  facet_wrap(~band) +
-  scale_fill_scico(palette = 'lipari', na.value = NA) +
-  theme_bw()
-
-ggplot() +
- # geom_stars(data = (mexico_confidence2[,,,2, drop = TRUE] - mexico_confidence2[,,,1, drop = TRUE]) |> setNames('CI')) +
-  geom_stars(data = (predictions[3,,,2, drop = TRUE] - predictions[2,,,2, drop = TRUE]) |> setNames('CI')) +
+  geom_stars(data = (predictions[3,,, drop = TRUE] - predictions[2,,, drop = TRUE]) |> setNames('CI')) +
   geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
   coord_sf(expand = FALSE) +
   scale_fill_scico(palette = 'turku', na.value = NA, name = expression("CI ("^"87" * "Sr/" * ""^"86" * "Sr" * ")")) +
@@ -322,13 +249,12 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/mesoamerica_iscoscape_uncertainty_v2.png'), width = 10, height = 6.4)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_uncertainty_v5.png'), width = 10, height = 6.4)
 ```
 
-```{r fig.width=10, fig.asp =1}
+```{r fig.width=10, fig.asp =.9}
 ggplot() +
-  #geom_stars(data = mexico_confidence2 |> setNames('87Sr/86Sr')) +
-  geom_stars(data = merge(predictions[2:3, , , 2, .drop = TRUE] |> setNames(c('Lower', 'Upper')))) +
+  geom_stars(data = merge(predictions[2:3, , , .drop = TRUE] |> setNames(c('Lower', 'Upper')))) +
   geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
   coord_sf(expand = FALSE) +
   scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
@@ -348,19 +274,17 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/mesoamerica_iscoscape_range_v2.png'), width = 10, height = 10)
+ggsave(here('outputs/figures/mesoamerica_iscoscape_range_v5.png'), width = 10, height = 10)
 ```
 
 ```{r fig.width=10}
 ggplot() +
   geom_sf(data = mexico |> st_crop(oaxaca2 |> st_buffer(20000)), fill = 'lightgrey', color = NA) +
-  geom_stars(data = st_crop(predictions[1,,,2], st_bbox(oaxaca |> st_buffer(20000))) |> setNames('Sr'), alpha = 0.5) +
-  #geom_stars(data = st_crop(mexico_predictions2, oaxaca) |> setNames('87Sr/86Sr')) +
-  geom_stars(data = st_crop(predictions[1,,,2], oaxaca)|> setNames('Sr')) +
-  #geom_sf(data = mexico, fill = NA, color = 'white') +
+  geom_stars(data = st_crop(predictions[1,,], st_bbox(oaxaca |> st_buffer(20000))) |> setNames('Sr'), alpha = 0.5) +
+  geom_stars(data = st_crop(predictions[1,,], oaxaca)|> setNames('Sr')) +
     geom_sf(data = oaxaca, fill = NA, linewidth = 1, color = 'white') +
-  geom_sf(data = filter(dat, oaxaca), color = 'white') +
-    geom_sf(data = dat |> filter(type == 'human') |> st_filter(oaxaca2), color = 'red') +
+  geom_sf(data = filter(dat, oaxaca) |> st_transform(albers), color = 'white') +
+    geom_sf(data = dat |> filter(type == 'human') |> st_transform(albers) |> st_filter(oaxaca2), color = 'red') +
   coord_sf(expand = FALSE) +
   scale_fill_scico(palette = 'lipari', na.value = NA, name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
   theme_bw() +
@@ -379,74 +303,13 @@ ggplot() +
     style = ggspatial::north_arrow_fancy_orienteering
   )
 
-ggsave(here('outputs/figures/oaxaca_isoscape_bart_v2.png'), width = 10, height = 6.4)
+ggsave(here('outputs/figures/oaxaca_isoscape_bart_v5.png'), width = 10, height = 6.4)
 ```
 
-```{r}
-ggplot(oax_preds, aes(Sr, .pred)) +
-  geom_point(aes(color = Locality)) +
-  geom_abline(color = 'red', linetype = 2) +
-  theme_bw()
 
-ggplot(iso, aes(Sr, .pred)) +
-  geom_point(aes(color = `Plant Rooting Depth`)) +
-    geom_abline(color = 'red', linetype = 2) +
-  theme_bw()
 
-ggplot(iso, aes(Sr, .pred)) +
-  geom_point(aes(color = Species)) +
-    geom_abline(color = 'red', linetype = 2) +
-  theme_bw()
-```
 
-### Interpolating Errors
 
-```{r}
-errors <- augment(bart_final, dat) |>
-  st_as_sf() |>
-  st_crop(mexico_bbox) |>
-  transmute(error = inverse_logit_transform(Sr) - inverse_logit_transform(.pred))
-
-ggplot() +
-  #geom_sf(data = mexico, fill = 'black', color = NA) +
-  geom_stars(data = mexico_predictions2 |> setNames('Sr')) +
-  geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
-  #  geom_sf(data = mexico, fill = NA, color = 'white') +
-  coord_sf(expand = FALSE) +
-  scale_fill_viridis_c(option = 'magma', na.value = NA, 
-             #limits = c(0.7033230, 0.7221751)
-             ) +
-  geom_sf(data = errors, aes(color = error)) +
-  theme_bw() +
-  theme(
-    panel.background = element_rect(fill = "lightblue"),
-    panel.grid.major = element_line(color = "white", linewidth = 0.5),
-        plot.margin = margin(0, 0, 0, 0)
-  ) +
-  labs(x = '', y = '') + 
-  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
-  ggspatial::annotation_north_arrow(
-    location = "bl", 
-    which_north = "true",
-    pad_x = unit(0.2, "in"), 
-    pad_y = unit(0.2, "in"),
-    style = ggspatial::north_arrow_fancy_orienteering
-  )
-```
-
-this is becuase of san martin tilcajete being in again
-
-```{r}
-library(fields) 
-tps <- Tps(st_coordinates(errors), errors$error)
-r <- rast(mexico_predictors[[20]])
-# use model to predict values at all locations
-p <- interpolate(r, tps, xyNames = c('X', 'Y'))
-p <- mask(p, mexico_predictors[[20]])
-plot(p)
-plot(rast(mexico_predictions2))
-plot(rast(mexico_predictions2) + (p))
-```
 
 ## Origin Assignment Monte Alban
 
@@ -462,6 +325,7 @@ plot(oaxaca_predictors)
 montealban <- test |>
   filter(type2 == 'Zapotec') %>%
   bake(extract_recipe(bart_final), .)
+
 
 predict_bart <- getS3method("predict", "bart", envir = asNamespace("dbarts"))
 library(dbarts)
@@ -501,48 +365,11 @@ predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |>
   geom_vline(xintercept = filter(test, type2 == 'Zapotec')$Sr |> inverse_logit_transform(), color = 'red')
 quantile(montealban$Sr |> inverse_logit_transform())
 
-predict(extract_fit_engine(bart_final_2), montealban, type = 'ppd') |> 
+predict(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
   inverse_logit_transform() |>
-quantile(c(0.05, 0.95))
-
-library(ggridges)
-ma_samp <- readxl::read_excel(here('Monte_Alban_Test_Individuals.xlsx')) |>
-  select(entry_id = `Entry ID`,
-         burial_id = `Burial ID Number`,
-         Sr = `87Sr/86Sr`,
-         sd = `± error...44`,
-         local = `Sr Local/non-local`,
-         type = `Sample Type/Element`) |>
-  mutate(samp = map2(Sr, sd, ~rnorm(500000, .x, .y))) |>
-  unnest(samp)
-
-ggplot(ma_samp, aes(y = factor(entry_id), x = samp, fill = local)) +
-  geom_density_ridges() +
-    theme_bw() +
-    labs(x = 'Sr', y = 'Entry ID')
-
-predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
-  inverse_logit_transform() |>
-  as_tibble() |>
-  pivot_longer(everything()) |>
-  pull(value) |>
-  quantile(c(1/4, 0.5, 3/4))
-
-  ggplot() +
- #   scale_y_continuous(expand = c(0,0)) +
-    annotate("rect", ymin = 0.7068918, ymax = 0.7085985, xmin = -Inf, xmax = Inf, 
-           alpha = .3) +
-  geom_boxplot(data = ma_samp, aes(burial_id, samp, group = factor(entry_id), fill = type), alpha = 0.8) +
-    
-    
-  #  geom_hline(aes(yintercept = 0.7076825), linetype = 2, linewidth = 1) +
-  theme_bw() + 
-    scale_fill_discrete(name = '') +
-    coord_flip() +
-    scale_x_discrete(limits = rev) +
-    labs(y = '87Sr/86Sr', x = 'Burial ID')
-ggsave(here('outputs/figures/montealban_locals.png'), width = 6, height = 4, bg = 'white')
+quantile(c(0.025, 0.05, 0.95, 0.975))
 ```
+
 
 ```{r}
 # Read and process the data (keeping your original data processing)
@@ -555,10 +382,12 @@ ma_samp <- readxl::read_excel(here('Monte_Alban_Test_Individuals.xlsx')) |>
          type = `Sample Type/Element`) |>
   # Remove the simulation step - work with raw analytical data
   distinct()  |> # Remove any duplicates from the unnesting
-  mutate(actual_se = sd * Sr) # convert % SE to actual SE
+  mutate(actual_se = sd * Sr, # convert % SE to actual SE
+         type = factor(type, levels = c('femur', 'enamel'))) 
 
 
 # Get model prediction ranges (keeping your quantile approach)
+set.seed(42)
 model_range <- predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
   inverse_logit_transform() |>
   as_tibble() |>
@@ -604,120 +433,9 @@ ggplot(ma_samp, aes(x = burial_id, y = Sr, color = type)) +
   ) +
   labs(y = expression(""^"87" * "Sr/" * ""^"86" * "Sr"), x = 'Burial ID')
 
-ggsave(here('outputs/figures/montealban_locals_error_bars_2_se_v4.png'), width = 6, height = 4, bg = 'white')
+ggsave(here('outputs/figures/montealban_locals_error_bars_2_se_v7.png'), width = 6, height = 4, bg = 'white')
 ```
 
-```{r}
-# VERSION 1: Original - treating error values as absolute standard errors
-# (Your current approach)
-plot_v1 <- ggplot(ma_samp, aes(x = burial_id, y = Sr, color = type)) +
-  annotate("rect", 
-           xmin = -Inf, xmax = Inf,
-           ymin = model_range[1], ymax = model_range[5], 
-           alpha = 0.3, fill = "gray") +
-   annotate("rect", 
-           xmin = -Inf, xmax = Inf,
-           ymin = model_range[2], ymax = model_range[4], 
-           alpha = 0.3, fill = "gray") +
-  geom_hline(yintercept = model_range[3], linetype = 2, linewidth = 1, color = 'darkgrey') +
-  geom_point(size = 3, position = position_dodge(width = 0.3)) +
-  geom_errorbar(aes(ymin = Sr - sd, ymax = Sr + sd), 
-                width = 0.2, 
-                position = position_dodge(width = 0.3),
-                linewidth = 1) +
-  geom_errorbar(aes(ymin = Sr - 2*sd, ymax = Sr + 2*sd), 
-                width = 0.1, 
-                position = position_dodge(width = 0.3),
-                linewidth = 0.5, alpha = 0.6) +
-  coord_flip() +
-  scale_x_discrete(limits = rev) +
-  scale_color_manual(name = '', values = c("enamel" = "#E69F00", "femur" = "#56B4E9")) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank(), legend.position = "right") +
-  labs(x = expression(""^"87" * "Sr/" * ""^"86" * "Sr"), y = 'Burial ID',
-       title = "Version 1: Error values as absolute SE") +
-    scale_y_continuous(limits = c(0.705, 0.71), expand = c(0, 0)) # Adjust y-axis limits for better visibility
-
-
-# VERSION 2: Assuming error values are proportions (0.00070 = 0.070% SE)
-# Convert proportion to actual SE: SE = (proportion × mean) / 100
-ma_samp_v2 <- ma_samp |>
-  mutate(actual_se = sd * Sr)
-
-plot_v2 <- ggplot(ma_samp_v2, aes(x = burial_id, y = Sr, color = type)) +
-
-  annotate("rect", 
-           xmin = -Inf, xmax = Inf,
-           ymin = model_range[1], ymax = model_range[5], 
-           alpha = 0.3, fill = "gray") +
-   annotate("rect", 
-           xmin = -Inf, xmax = Inf,
-           ymin = model_range[2], ymax = model_range[4], 
-           alpha = 0.3, fill = "gray") +
-  geom_hline(yintercept = model_range[3], linetype = 2, linewidth = 1, color = 'darkgrey') +
-  geom_point(size = 4, position = position_dodge(width = 0.3)) +
-  geom_errorbar(aes(ymin = Sr - actual_se, ymax = Sr + actual_se), 
-                width = 0.2, 
-                position = position_dodge(width = 0.3),
-                linewidth = 1) +
-  geom_errorbar(aes(ymin = Sr - 2*actual_se, ymax = Sr + 2*actual_se), 
-                width = 0.1, 
-                position = position_dodge(width = 0.3),
-                linewidth = 0.5, alpha = 0.6) +
-  coord_flip() +
-  scale_x_discrete(limits = rev) +
-  scale_color_manual(name = '', values = c("enamel" = "#E69F00", "femur" = "#56B4E9")) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank(), legend.position = "right") +
-  labs(x = expression(""^"87" * "Sr/" * ""^"86" * "Sr"), y = 'Burial ID',
-       title = "Version 2: Error values as proportions (0.00070 = 0.070% SE)") +
-    scale_y_continuous(limits = c(0.705, 0.71), expand = c(0, 0)) # Adjust y-axis limits for better visibility
-
-
-# VERSION 3: Assuming error values are already percentages (0.00070 = 0.70% SE)
-# Convert percentage to actual SE: SE = (percentage × mean) / 100
-ma_samp_v3 <- ma_samp |>
-  mutate(actual_se = (sd / 100 * Sr))
-
-plot_v3 <- ggplot(ma_samp_v3, aes(x = burial_id, y = Sr, color = type)) +
- 
-  annotate("rect", 
-           xmin = -Inf, xmax = Inf,
-           ymin = model_range[1], ymax = model_range[5], 
-           alpha = 0.3, fill = "gray") +
-   annotate("rect", 
-           xmin = -Inf, xmax = Inf,
-           ymin = model_range[2], ymax = model_range[4], 
-           alpha = 0.3, fill = "gray") +
-  geom_hline(yintercept = model_range[3], linetype = 2, linewidth = 1, color = 'darkgrey') +
-  geom_point(size = 3, position = position_dodge(width = 0.3)) +
-  geom_errorbar(aes(ymin = Sr - actual_se, ymax = Sr + actual_se), 
-                width = 0.2, 
-                position = position_dodge(width = 0.3),
-                linewidth = 1) +
-  geom_errorbar(aes(ymin = Sr - 2*actual_se, ymax = Sr + 2*actual_se), 
-                width = 0.1, 
-                position = position_dodge(width = 0.3),
-                linewidth = 0.5, alpha = 0.6) +
-  coord_flip() +
-  scale_x_discrete(limits = rev) +
-  scale_color_manual(name = '', values = c("enamel" = "#E69F00", "femur" = "#56B4E9")) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank(), legend.position = "right") +
-  labs(x = expression(""^"87" * "Sr/" * ""^"86" * "Sr"), y = 'Burial ID',
-       title = "Version 3: Error values as percentages (0.00070 = 0.70% SE)") +
-  scale_y_continuous(limits = c(0.705, 0.71), expand = c(0, 0)) # Adjust y-axis limits for better visibility
-
-# Display all three plots
-library(patchwork)
-(plot_v1 / plot_v2 / plot_v3)
-
-# You can also look at the actual SE values to see which makes most sense:
-cat("Comparison of SE values for first few samples:\n")
-cat("Version 1 (absolute):", ma_samp$sd[1:3], "\n")
-cat("Version 2 (proportion):", ma_samp_v2$actual_se[1:3], "\n") 
-cat("Version 3 (percentage):", ma_samp_v3$actual_se[1:3], "\n")
-```
 
 ```{r}
 library(philentropy)
@@ -811,222 +529,6 @@ ggplot() +
   filter(type2 == 'Zapotec'), fill = NA, color = 'red') +
   scale_fill_viridis_c(na.value = NA) +
   theme_bw()
-```
-
-## Applicability analysis
-
-```{r}
-library(applicable)
-train_pca <- apd_pca(rec |> step_rm(type), train)
-train_pca
-autoplot(train_pca)
-pca_score <- score(train_pca, test)
-pca_score
-
-training_scores <- score(train_pca, train)
-ggplot(training_scores, aes(x = PC05)) + 
-  geom_histogram(col = "white", binwidth = .5) + 
-  geom_vline(xintercept = pca_score$PC01, col = "red")
-```
-
-top right are from Cayo, sample id F4581, F4573, 4574, etc. on Chalilo reservoir on Macal River also the ones lower than that are from the same reservoir. so why does the model place them lower? must be an issue with the location data? but also my predictors must do something weird there? ahh so the reservoir is immediately beyond and below the maya mountains, so we'd both get individuals who are different in both areas and uncertainty in where they're sampled!
-
-the low values that are over predicted are likely the human samples from the forensic study!
-
-the line of low samples is from cholula
-
-should we sample predictions with 5km buffer?
-
-```{r}
-library(mapview)
-mapview(mexico_predictions2) +
-  (test |>
-  bind_cols(predict(bart_final, test)) |>
- # filter(near(inverse_logit_transform(.pred), 0.706, 0.0001)) |>
-  #filter(oaxaca == FALSE) |>
-    mutate(error = abs(inverse_logit_transform(Sr) - inverse_logit_transform(.pred))) |>
-   arrange(error) |>
-  st_jitter(1000) |>
-  mapview(zcol = 'error'))
-```
-
-```{r}
-pip <- predict(bart_final, test) |>
-    bind_cols(test)  |>
-  filter(inverse_logit_transform(.pred) > .708,
-         inverse_logit_transform(Sr) > .712) |>
-  st_as_sf() |>
-  st_jitter(100) #|>
-  mapview() 
-
-  
-  pop <- predict(bart_final, test) |>
-    bind_cols(test)  |>
-  filter(inverse_logit_transform(.pred) > .7075,
-         inverse_logit_transform(Sr) < .706) |>
-  st_as_sf() |>
-  st_jitter(100) #|>
-  mapview() 
-```
-
-```{r}
-st_crop(mexico_predictions, )
-
-mapview(mexico_predictions) + mapview(pip)
-mapview(mexico_predictions) + mapview(pop) # this is where the model overpredicts -- Tikal
-mapview(mexico_predictions) + mapview(cambio)
-```
-
-```{r}
-mapview(dat)
-```
-
-need to check these locations for outliers, etc
-
-```{r}
-dat |> filter(oaxaca) |>
-  filter(inverse_logit_transform(Sr) > .71)
-```
-
-```{r}
-bart_final <- fit(bart_wflw, bind_rows(train, test))
-
-bind_cols(
-  predict(bart_final, test, type = 'conf_int'),
-  predict(bart_final, test),
-  test
-  ) |>
-  mutate(across(.pred_lower:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
-  geom_point(aes(color = oaxaca), alpha = 0.75) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-
-bind_cols(
-  predict(bart_final, test, type = 'conf_int'),
-  predict(bart_final, test),
-  test
-  ) |>
-  mutate(across(.pred_lower:Sr, inverse_logit_transform),
-         cholula = type2 == 'Cholultecan') |>
-  ggplot(aes(Sr, .pred)) +
-  geom_linerange(aes(ymin = .pred_lower, ymax = .pred_upper), alpha = .1) +
-  geom_point(aes(color = cholula), alpha = 0.75) +
-  geom_abline() +
-  coord_equal() +
-  theme_bw()
-```
-
-```{r}
-bind_cols(
-  predict(bart_final, test, type = 'conf_int'),
-  predict(bart_final, test),
-  test
-  ) |>
-  mutate(across(.pred_lower:Sr, inverse_logit_transform),
-         cholula = type2 == 'Cholultecan') |>
-  filter(.pred > .7075, Sr < .705) |>
-  st_as_sf() |>
-  mapview() # tiakl
-```
-
-```{r}
-augment(bart_final, test) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rsq(Sr, .pred)
-```
-
-```{r}
-bart_final |> extract_fit_engine() |>
-varimp()
-ggsave('varimp.png', height = 4, width = 6)
-```
-
-```{r, fig.width=20}
-bart_engine$fit$plotTree(chainNum = 1, sampleNum = 200, treeNum = 2)
-```
-
-so rsq of lgobal model on mexico humans 0.7945906, rmse 0.0009091804. global model on oaxaca plants 0.2494225 0.001407602.\
-global + oaxaca plants on mexico humans 0.8128091 0.0008153871. global mmodel with mexci humans on oaxaca plants 0.2051828 0.0009941103
-
-so adding in the mexican humans actually reduces perfromance on oaxaca plants, actually no, the rsq goes own but the rmse goes down too. likely because the humans samples in oaxaca give it a good baseline?! but add int plants increases performance on humans
-
-```{r}
-bart_nooaxaca <- fit(bart_wflw, bind_rows(train, test |> filter(!oaxaca)))
-bart_oaxaca <- fit(bart_wflw, bind_rows(train, test |> filter(oaxaca)))
-
-augment(bart_fit, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rsq(Sr, .pred)
-
-augment(bart_fit, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rmse(Sr, .pred)
-
-augment(bart_fit, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rsq(Sr, .pred)
-
-augment(bart_fit, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rmse(Sr, .pred)
-
-augment(bart_oaxaca, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rsq(Sr, .pred)
-
-augment(bart_oaxaca, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rmse(Sr, .pred)
-
-augment(bart_nooaxaca, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rsq(Sr, .pred)
-
-augment(bart_nooaxaca, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  rmse(Sr, .pred)
-```
-
-```{r}
-augment(bart_nooaxaca, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
-
-augment(bart_fit, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
-
-augment(bart_oaxaca, test |> filter(oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
-
-# mexican humans
-augment(bart_nooaxaca, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
-
-augment(bart_fit, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
-
-augment(bart_oaxaca, test |> filter(!oaxaca)) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  ggplot(aes(Sr, .pred)) +
-  geom_point() +
-  geom_abline()
 ```
 
 # figs 2 and 1 from manuscript
