@@ -1,0 +1,471 @@
+---
+title: "Oaxaca Isoscape Analysis and Visualization"
+author: Nick Gauthier
+format: html
+editor: visual
+---
+
+This notebook generates all publication figures for the Oaxaca isoscape project. Loads pre-computed models and data from preprocessing and modeling scripts.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+# Data management and visualization
+library(tidyverse)
+library(tidymodels)
+library(here)
+
+# Spatial data
+library(sf)
+library(stars)
+library(terra)
+library(rnaturalearth)
+
+# Visualization
+library(scico)
+library(patchwork)
+library(ggrepel)
+library(ggnewscale)
+library(RColorBrewer)
+
+# Model utilities
+library(bundle)
+library(dbarts)
+
+# Load helper functions
+source(here('R/helpers.R'))
+```
+
+# Load Pre-computed Data
+
+```{r load-data}
+# Predictor rasters and model
+mexico_predictors <- readRDS(here('data/derived/mexico_predictors.rds'))[[-4]] # removes sediment
+bart_final <- readRDS(here('outputs/models/bart_final.rds')) |> unbundle()
+
+# Training data and splits
+dat <- readRDS(here('data/derived/dat.rds'))
+test <- readRDS(here('data/derived/test.rds'))
+train <- readRDS(here('data/derived/train.rds'))
+pts_combined <- readRDS(here('data/derived/pts_combined.rds'))
+oaxaca_plants <- readRDS(here('data/derived/oaxaca_plants.rds'))
+```
+
+# Figure 1: Study Area
+
+## Geological Map
+
+Create geological map showing sampling localities and bedrock geology of the study area.
+
+```{r geological-data}
+# Load geological shapefiles
+bedrock1 <- read_sf(here('data/archive/G02042022203359X/Litologia_E14_9.shp'))
+bedrock2 <- read_sf(here('data/archive/J02042022204037E/Litologia_E14_12.shp'))
+
+# Create point locations
+oaxaca_city <- st_sf(
+  geometry = st_sfc(st_point(c(-96.7266, 17.0732))),
+  crs = 4326
+) |>
+  st_transform(st_crs(bedrock1)) |>
+  mutate(name = 'Oaxaca City')
+
+plant_pts <- oaxaca_plants |>
+  group_by(Locality) |>
+  summarize() |>
+  st_transform(st_crs(bedrock1)) |>
+  rename(name = Locality) |>
+  bind_rows(oaxaca_city)
+
+# Process bedrock geology
+bedrock <- rbind(bedrock1, bedrock2) %>%
+  st_union(by_feature = TRUE) |>
+  st_crop(st_buffer(plant_pts, 10000)) |>
+  group_by(EDFINAL) |>
+  summarize() |>
+  mutate(
+    period_en = case_when(
+      EDFINAL %in% c("Berriasiano", "Cretácico inferior") ~ "Lower Cretaceous",
+      EDFINAL == "Proterozoico medio" ~ "Mesoproterozoic",
+      EDFINAL == "Pérmico" ~ "Permian",
+      EDFINAL == "Aptiano" ~ "Aptian",
+      EDFINAL == "Cenomaniano" ~ "Cenomanian",
+      EDFINAL == "Jurásico medio" ~ "Middle Jurassic",
+      EDFINAL == "Maastrichtiano" ~ "Maastrichtian",
+      EDFINAL == "Eoceno" ~ "Eocene",
+      EDFINAL == "Mioceno" ~ "Miocene",
+      EDFINAL == "Plioceno" ~ "Pliocene",
+      EDFINAL == "Holoceno" ~ "Holocene"
+    ),
+    period_en = factor(period_en, levels = c(
+      "Mesoproterozoic", "Permian", "Middle Jurassic", "Lower Cretaceous",
+      "Aptian", "Cenomanian", "Maastrichtian", "Eocene", "Miocene",
+      "Pliocene", "Holocene"
+    ))
+  )
+```
+
+```{r fig-geological-map, fig.width=15, fig.height=10}
+# Assign eras for grouped legend
+bedrock <- bedrock %>%
+  mutate(
+    era = case_when(
+      period_en %in% c("Mesoproterozoic") ~ "Precambrian",
+      period_en %in% c("Permian") ~ "Paleozoic",
+      period_en %in% c("Middle Jurassic","Lower Cretaceous","Aptian","Cenomanian","Maastrichtian") ~ "Mesozoic",
+      period_en %in% c("Eocene","Miocene","Pliocene","Holocene") ~ "Cenozoic"
+    )
+  )
+
+# Create color palette
+groups <- list(
+  Precambrian = c("Mesoproterozoic"),
+  Paleozoic   = c("Permian"),
+  Mesozoic    = c("Middle Jurassic","Lower Cretaceous","Aptian","Cenomanian","Maastrichtian"),
+  Cenozoic    = c("Eocene","Miocene","Pliocene","Holocene")
+)
+
+all_lvls <- levels(bedrock$period_en)
+pal <- rev(brewer.pal(length(all_lvls), "Spectral"))
+cols_all <- setNames(pal, all_lvls)
+
+# Create plot with separate legends by era
+ggplot() +
+  # Precambrian
+  geom_sf(data = filter(bedrock, period_en %in% groups$Precambrian),
+          aes(fill = period_en), color = "white", size = 0.1) +
+  scale_fill_manual(values = cols_all[groups$Precambrian], name = "Precambrian",
+                   guide = guide_legend(order = 1)) +
+  new_scale_fill() +
+  # Paleozoic
+  geom_sf(data = filter(bedrock, period_en %in% groups$Paleozoic),
+          aes(fill = period_en), color = "white", size = 0.1) +
+  scale_fill_manual(values = cols_all[groups$Paleozoic], name = "Paleozoic",
+                   guide = guide_legend(order = 2)) +
+  new_scale_fill() +
+  # Mesozoic
+  geom_sf(data = filter(bedrock, period_en %in% groups$Mesozoic),
+          aes(fill = period_en), color = "white", size = 0.1) +
+  scale_fill_manual(values = cols_all[groups$Mesozoic], name = "Mesozoic",
+                   guide = guide_legend(order = 3)) +
+  new_scale_fill() +
+  # Cenozoic
+  geom_sf(data = filter(bedrock, period_en %in% groups$Cenozoic),
+          aes(fill = period_en), color = "white", size = 0.1) +
+  scale_fill_manual(values = cols_all[groups$Cenozoic], name = "Cenozoic",
+                   guide = guide_legend(order = 4)) +
+  # Sampling locations
+  geom_sf(data = plant_pts, color = 'black') +
+  geom_label_repel(
+    data = plant_pts,
+    aes(geometry = geometry, label = name),
+    stat = "sf_coordinates",
+    segment.color = "black",
+    force = 2, min.segment.length = 0,
+    nudge_x = 0.2, nudge_y = 0.2,
+    force_pull = 2, max.overlaps = Inf
+  ) +
+  theme_minimal() +
+  labs(x = NULL, y = NULL)
+
+ggsave(here('outputs/figures/geological_map.png'), width = 12, height = 8, bg = 'white')
+```
+
+## Satellite Imagery
+
+Create satellite imagery map using Sentinel-2 data from Google Earth Engine.
+
+```{r satellite-setup, eval=FALSE}
+# Note: Requires Earth Engine authentication
+library(reticulate)
+library(rgee)
+py_require('earthengine-api')
+
+ee <- import('ee')
+ee$Initialize()
+
+bbox_ee <- sf_as_ee(st_as_sfc(st_bbox(bedrock |> st_buffer(5000))) |> st_transform(4326))
+viz <- list(bands = c("B4", "B3", "B2"), min = 0, max = 2500)
+```
+
+```{r satellite-imagery, eval=FALSE, fig.width=20}
+# Get Sentinel-2 imagery
+s2 <- ee$ImageCollection("COPERNICUS/S2_SR_HARMONIZED")$
+  filterBounds(bbox_ee)$
+  filter(ee$Filter$date('2023-01-01', '2023-01-20'))$
+  filter(ee$Filter$lt('CLOUDY_PIXEL_PERCENTAGE', 30))$
+  select(c('B2', 'B3', 'B4'))$
+  median() |>
+  ee_as_thumbnail(bbox_ee, dimensions = c(1150, 1080) * 2, vizparams = viz)
+
+# Create satellite map
+ggplot() +
+  geom_stars(data = st_rgb(s2, maxColorValue = 1L)) +
+  geom_sf(data = plant_pts |> st_transform(4326), color = 'red', size = 3) +
+  geom_label_repel(
+    data = plant_pts |> st_transform(4326),
+    aes(geometry = geometry, label = name),
+    stat = "sf_coordinates",
+    segment.color = "black",
+    force = 2, min.segment.length = 0,
+    force_pull = 2, max.overlaps = Inf
+  ) +
+  theme_void()
+
+ggsave(here('outputs/figures/satellite_map.png'), width = 10, height = 10, bg = 'white')
+```
+
+# Figure 2: Training Data
+
+Visualize global and regional training data distributions.
+
+```{r fig-training-data, fig.width=10, fig.height=8}
+world <- ne_countries() |> st_transform(eck4)
+
+a <- pts_combined |>
+  arrange(Sr) |>
+  ggplot() +
+  geom_sf(data = world, color = 'lightgrey') +
+  geom_sf(aes(color = Sr), size = 0.1) +
+  scale_color_viridis_c() +
+  theme_minimal()
+
+b <- ggplot(pts_combined) +
+  geom_sf(data = st_as_sfc(world), color = 'lightgrey') +
+  geom_sf(alpha = 0.5, size = .1) +
+  theme_bw() +
+  facet_wrap(~type)
+
+c <- ggplot(pts_combined) +
+  geom_histogram(aes(Sr)) +
+  theme_bw() +
+  labs(y = 'Count')
+
+d <- ggplot(pts_combined) +
+  geom_bar(aes(reorder(type, type, function(x) length(x)))) +
+  theme_bw() +
+  coord_flip() +
+  labs(x = '', y = 'Count')
+
+a / (b + (c / d) + plot_layout(widths = c(2,.7))) +
+  plot_annotation(tag_levels = 'A', tag_suffix = ')') +
+  plot_layout(heights = c(2, 1.5))
+```
+
+# Figure 3: Model Predictions
+
+Generate isoscape predictions for Mexico.
+
+```{r generate-predictions, cache=TRUE}
+set.seed(42)
+mexico_predictions <- predict(mexico_predictors,
+                               bart_final,
+                               na.rm = TRUE) |>
+  st_as_stars() |>
+  inverse_logit_transform()
+
+set.seed(42)
+mexico_confidence <- predict(mexico_predictors, bart_final,
+                             type = 'conf_int',
+                             na.rm = TRUE) |>
+  st_as_stars() |>
+  inverse_logit_transform()
+
+# Combine into single stars object
+predictions <- c(mexico_predictions, split(mexico_confidence))
+saveRDS(predictions, here('data/derived/predictions.rds'))
+```
+
+```{r load-predictions}
+# Load pre-computed predictions if already generated
+predictions <- readRDS(here('data/derived/predictions.rds'))
+```
+
+## Mesoamerica Isoscape
+
+```{r fig-isoscape, fig.width=20, fig.asp=0.45}
+albers <- '+proj=aea +lon_0=-96 +lat_1=16.5 +lat_2=21.5 +lat_0=19 +datum=WGS84 +units=m +no_defs'
+mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
+  st_transform(albers)
+
+mexico <- ne_states('mexico') |>
+  st_transform(albers) |>
+  st_crop(mexico_bbox)
+
+ggplot() +
+  geom_stars(data = predictions[1,,]) +
+  geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
+  coord_sf(expand = FALSE) +
+  scale_fill_scico(palette = 'lipari', na.value = NA,
+                  name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "lightblue"),
+    panel.grid.major = element_line(color = "white", linewidth = 0.5),
+    plot.margin = margin(0, 0, 0, 0)
+  ) +
+  labs(x = '', y = '') +
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
+  ggspatial::annotation_north_arrow(
+    location = "bl",
+    which_north = "true",
+    pad_x = unit(0.2, "in"),
+    pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_fancy_orienteering
+  )
+
+ggsave(here('outputs/figures/mesoamerica_isoscape.png'), width = 10, height = 6.4)
+```
+
+## Uncertainty Map
+
+```{r fig-uncertainty, fig.width=20, fig.asp=0.45}
+ggplot() +
+  geom_stars(data = (predictions[3,,, drop = TRUE] - predictions[2,,, drop = TRUE]) |>
+               setNames('CI')) +
+  geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
+  coord_sf(expand = FALSE) +
+  scale_fill_scico(palette = 'turku', na.value = NA,
+                  name = expression("CI ("^"87" * "Sr/" * ""^"86" * "Sr" * ")")) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "lightblue"),
+    panel.grid.major = element_line(color = "white", linewidth = 0.5),
+    plot.margin = margin(0, 0, 0, 0)
+  ) +
+  labs(x = '', y = '') +
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
+  ggspatial::annotation_north_arrow(
+    location = "bl",
+    which_north = "true",
+    pad_x = unit(0.2, "in"),
+    pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_fancy_orienteering
+  )
+
+ggsave(here('outputs/figures/mesoamerica_isoscape_uncertainty.png'), width = 10, height = 6.4)
+```
+
+## Oaxaca Detail Map
+
+```{r fig-oaxaca-detail, fig.width=10}
+oaxaca <- mexico |>
+  filter(name == 'Oaxaca') |>
+  st_transform(st_crs(predictions))
+
+oaxaca2 <- mexico |> filter(name == 'Oaxaca')
+
+ggplot() +
+  geom_sf(data = mexico |> st_crop(oaxaca2 |> st_buffer(20000)),
+         fill = 'lightgrey', color = NA) +
+  geom_stars(data = st_crop(predictions[1,,], st_bbox(oaxaca |> st_buffer(20000))) |>
+               setNames('Sr'), alpha = 0.5) +
+  geom_stars(data = st_crop(predictions[1,,], oaxaca) |> setNames('Sr')) +
+  geom_sf(data = oaxaca, fill = NA, linewidth = 1, color = 'white') +
+  geom_sf(data = filter(dat, oaxaca) |> st_transform(albers), color = 'white') +
+  geom_sf(data = dat |> filter(type == 'human') |> st_transform(albers) |>
+           st_filter(oaxaca2), color = 'red') +
+  coord_sf(expand = FALSE) +
+  scale_fill_scico(palette = 'lipari', na.value = NA,
+                  name = expression(""^"87" * "Sr/" * ""^"86" * "Sr")) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "lightblue"),
+    panel.grid.major = element_line(color = "white", linewidth = 0.5),
+    plot.margin = margin(0, 0, 0, 0)
+  ) +
+  labs(x = '', y = '') +
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
+  ggspatial::annotation_north_arrow(
+    location = "bl",
+    which_north = "true",
+    pad_x = unit(0.2, "in"),
+    pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_fancy_orienteering
+  )
+
+ggsave(here('outputs/figures/oaxaca_isoscape.png'), width = 10, height = 6.4)
+```
+
+# Figure 4: Monte Alban Origin Assignment
+
+Analyze Monte Alban individuals using predicted local signature.
+
+```{r montealban-setup}
+# Prepare Monte Alban test location
+montealban <- test |>
+  filter(type2 == 'Zapotec') %>%
+  bake(extract_recipe(bart_final), .)
+
+# Generate posterior predictive distribution
+predict_bart <- getS3method("predict", "bart", envir = asNamespace("dbarts"))
+
+set.seed(42)
+ma_ppd <- predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |>
+  inverse_logit_transform()
+```
+
+## Monte Alban Local Signature
+
+```{r fig-montealban-density, fig.width=6, fig.height=5}
+as_tibble(ma_ppd) |>
+  pivot_longer(everything()) |>
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(y = after_stat(density))) +
+  labs(x = expression(""^"87" * "Sr/" * ""^"86" * "Sr"),
+       y = 'Density') +
+  theme_bw()
+
+ggsave(here('outputs/figures/montealban_density.png'), width = 6, height = 5, bg = 'white')
+```
+
+## Monte Alban Individuals
+
+```{r fig-montealban-locals, fig.width=6, fig.height=4}
+# Load Monte Alban individual data
+ma_samp <- readxl::read_excel(here('data/raw/Monte_Alban_Test_Individuals.xlsx')) |>
+  select(entry_id = `Entry ID`,
+         burial_id = `Burial ID Number`,
+         Sr = `87Sr/86Sr`,
+         sd = `± error...44`,
+         local = `Sr Local/non-local`,
+         type = `Sample Type/Element`) |>
+  distinct() |>
+  mutate(actual_se = sd / 100 * Sr,
+         type = factor(type, levels = c('femur', 'enamel')))
+
+# Get model prediction range
+set.seed(42)
+model_range <- predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |>
+  inverse_logit_transform() |>
+  as_tibble() |>
+  pivot_longer(everything()) |>
+  pull(value) |>
+  quantile(c(0.25, 0.4, 0.5, 0.6, 0.75))
+
+# Create comparison plot
+ggplot(ma_samp, aes(x = burial_id, y = Sr, color = type)) +
+  annotate("rect",
+           xmin = -Inf, xmax = Inf,
+           ymin = model_range[1], ymax = model_range[5],
+           alpha = 0.3, fill = "gray") +
+  geom_hline(yintercept = model_range[3], linetype = 2, linewidth = 1, color = 'darkgrey') +
+  geom_point(size = 3, position = position_dodge(width = 0.3)) +
+  coord_flip() +
+  scale_x_discrete(limits = rev) +
+  scale_color_manual(name = '', values = c("enamel" = "#E69F00", "femur" = "#56B4E9")) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  ) +
+  labs(y = expression(""^"87" * "Sr/" * ""^"86" * "Sr"), x = 'Burial ID')
+
+ggsave(here('outputs/figures/montealban_locals.png'), width = 6, height = 4, bg = 'white')
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
