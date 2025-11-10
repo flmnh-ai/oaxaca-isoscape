@@ -40,7 +40,7 @@ dat <- readRDS(here('data/derived/dat.rds')) |>
   mutate(Sr = logit_transform(Sr)) |>
   mutate(mexico = lengths(st_intersects(geometry, st_as_sfc(mexico_bbox))) > 0) |>
   st_crop(train_bbox) |>
-  select(-c(starts_with('sediment')))#, nitrogen, phosphorus, pyroclastic))
+  select(-sediment) # remove sediment here!
   
 train <- dat |>
   filter(!mexico) |>
@@ -51,9 +51,6 @@ test <- dat |>
   select(-mexico) |>
   mutate(type2 = replace_na(type2, ''), 
          material = replace_na(material, ''))
-
-train_mean <- mean(train$Sr)
-train_sd <- sd(train$Sr)
 ```
 
 ```{r}
@@ -64,9 +61,9 @@ mapview::mapview(train) + mapview::mapview(test, color = 'red')
 
 ```{r}
 # initial splits
-splits <- make_splits(train, test)
-splits_oaxaca <- make_splits(bind_rows(train, filter(test, !oaxaca)), filter(test, oaxaca))
-splits_mexico <- make_splits(train, filter(test, !oaxaca))
+splits <- make_splits(train, test) # train on north and south america, test on mesoamerica and oaxaca
+splits_oaxaca <- make_splits(bind_rows(train, filter(test, !oaxaca)), filter(test, oaxaca)) # train on north+south+mesoamerica, test on oaxaca
+splits_mexico <- make_splits(train, filter(test, !oaxaca)) # train on north+south america, test on mesoamerica
 
 # calculate cv folds
 mexico_folds <- manual_rset(list(splits_mexico,  # 5 replications
@@ -74,10 +71,6 @@ mexico_folds <- manual_rset(list(splits_mexico,  # 5 replications
                                  splits_mexico, 
                                  splits_mexico, 
                                  splits_mexico), ids = as.character(1:5)) 
-
-# for spatial cv (not used)
-#set.seed(1111)
-#folds <- group_vfold_cv(train, group = seqnum,  v = 8, repeats = 2, balance = 'observations')
 ```
 
 ## Model Fitting
@@ -91,9 +84,8 @@ rec <- recipe(Sr ~ ., train) |>
   update_role(c(geometry, oaxaca, type, type2, material, seqnum), 
               new_role = 'other') |>
   update_role_requirements('other', bake = FALSE) |> 
-### step_naomit(all_predictors(), -starts_with('soil')) |>
-  step_impute_knn(starts_with('soil')) |>
-  step_normalize(all_numeric_predictors())
+  step_impute_knn(starts_with('soil')) |> # impute some soil points on coastal/urban pixels
+  step_normalize(all_numeric_predictors()) # normalize to help convergence
 
 bart_mod <- parsnip::bart(mode = 'regression', 
                  trees = tune(),
@@ -187,8 +179,9 @@ bart_wflw_final <- parsnip::bart(mode = 'regression',
 
 Fit the finalized workflow and predict on our two test datasets.
 ```{r}
-results_mexico <- last_fit(bart_wflw_final, splits_mexico)
-results_oaxaca <- last_fit(bart_wflw_final, splits_oaxaca)
+set.seed(42)
+results_mexico <- last_fit(bart_wflw_final, splits_mexico) # train on north+south america, test on mesoamerica
+results_oaxaca <- last_fit(bart_wflw_final, splits_oaxaca) # train on north+south+mesoamerica, test on oaxaca
 ```
 
 Check that both models are converging.
@@ -197,30 +190,35 @@ convergence(results_mexico)
 convergence(results_oaxaca)
 ```
 
-Look at the performance metrics on the logit scale.
-```{r}
-list(mexico = collect_metrics(results_mexico),
-     oaxaca = collect_metrics(results_oaxaca)) |>
-  list_rbind(names_to = 'model')  |>
-  select(model, .metric, .estimate) |>
-  pivot_wider(names_from = .metric, values_from = .estimate)
+Look at the performance metrics:
 
+These are metrics for continental scale training data
+
+Train on north+south america, test on mesoamerica without oaxaca
+```{r}
+set.seed(42) #make sure we get consistent posterior draws
 extract_workflow(results_mexico) |>
-  augment(filter(test, oaxaca)) |>
+  augment(filter(test, !oaxaca)) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
 
+set.seed(42)
 extract_workflow(results_mexico) |>
-  augment(filter(test, oaxaca)) |>
+  augment(filter(test, !oaxaca)) |>
   mutate(across(.pred:Sr, ~inverse_logit_transform(.x))) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
+```
 
+Train on north+south+mesoamerica, test on mesoamerica (in sample)
+```{r}
+set.seed(42)
 extract_workflow(results_oaxaca) |>
   augment(filter(test, !oaxaca)) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
 
+set.seed(42)
 extract_workflow(results_oaxaca) |>
   augment(filter(test, !oaxaca)) |>
   mutate(across(.pred:Sr, ~inverse_logit_transform(.x))) |>
@@ -228,24 +226,64 @@ extract_workflow(results_oaxaca) |>
          rsq = rsq_vec(.pred, Sr))
 ```
 
+Train on north+south america, test on oaxaca (no mesoamerica)
+```{r}
+set.seed(42)
+extract_workflow(results_mexico) |>
+  augment(filter(test, oaxaca)) |>
+  summarize(rmse = rmse_vec(.pred, Sr),
+         rsq = rsq_vec(.pred, Sr))
+
+set.seed(42)
+extract_workflow(results_mexico) |>
+  augment(filter(test, oaxaca)) |>
+  mutate(across(.pred:Sr, ~inverse_logit_transform(.x))) |>
+  summarize(rmse = rmse_vec(.pred, Sr),
+         rsq = rsq_vec(.pred, Sr))
+```
+
+
+
+Train on north+south+mesoamerica, test on oaxaca (out of sample)
+```{r}
+set.seed(42)
+extract_workflow(results_oaxaca) |>
+  augment(filter(test, oaxaca)) |>
+  summarize(rmse = rmse_vec(.pred, Sr),
+         rsq = rsq_vec(.pred, Sr))
+
+set.seed(42)
+extract_workflow(results_oaxaca) |>
+  augment(filter(test, oaxaca)) |>
+  mutate(across(.pred:Sr, ~inverse_logit_transform(.x))) |>
+  summarize(rmse = rmse_vec(.pred, Sr),
+         rsq = rsq_vec(.pred, Sr))
+```
+
+
+
 
 
 ```{r}
+set.seed(42)
 bart_final |>
   augment(filter(test, !oaxaca)) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
+set.seed(42)
 
 bart_final |>
   augment(filter(test, !oaxaca)) |>
   mutate(across(.pred:Sr, ~inverse_logit_transform(.x))) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
+set.seed(42)
 
 bart_final |>
   augment(filter(test, oaxaca)) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
+set.seed(42)
 
 bart_final |>
   augment(filter(test, oaxaca)) |>
@@ -260,14 +298,19 @@ Compare to the geological baseline model.
 baseline_geology <- terra::extract(rm1, test, search_radius = 5000) |>
   select(.pred = (rm1_reproj)) |>
   bind_cols(test) |>
-  mutate(Sr = (Sr),
-         .pred = logit_transform(.pred)) |>
+  mutate(Sr = inverse_logit_transform(Sr)) |>
   mutate(model = 'bedrock')
-        
+
 baseline_geology |>
   group_by(oaxaca) |>
   summarize(rmse = rmse_vec(.pred, Sr),
          rsq = rsq_vec(.pred, Sr))
+
+
+baseline_geology |>
+  group_by(oaxaca) |>
+  summarize(rmse = rmse_vec(logit_transform(.pred), logit_transform(Sr)),
+         rsq = rsq_vec(logit_transform(.pred), logit_transform(Sr)))
 ```
 
 And on the original scale.
@@ -356,6 +399,7 @@ predict(extract_workflow(results_oaxaca), filter(test, !oaxaca), type = 'conf_in
 
 Train a final model on all the data.
 ```{r}
+set.seed(42)
 bart_final <- fit(bart_wflw_final, dat)
 ```
 
@@ -471,71 +515,3 @@ shap_montealban <- predict_parts(explainer = explainer, new_observation = montea
 plot(shap_montealban)
 ```
 
-## Examining Residuals
-
-```{r}
-errors <- results_mexico |>
-  extract_workflow() |>
-  #augment(test) |>
-  augment(dat) |>
-  mutate(across(.pred:Sr, inverse_logit_transform)) |>
-  mutate(error = .pred - Sr,
-         error_abs = abs(error)) |>
-  arrange(-error_abs) |>
-  st_as_sf()
-errors
-```
-
-
-```{r}
-library(fields) 
-library(terra)
-any(is.na(errors$error))
-tps <- Tps(st_coordinates(errors), errors$error)
-# use model to predict values at all locations
-r <- terra::crop(rm1, mexico_bbox)
-plot(r)
-p <- terra::interpolate(r, tps, xyNames = c('X', 'Y'))
-p <- mask(p, mexico_predictors[[14]])
-plot(p)
-plot(rast(mexico_predictions2))
-plot(rast(mexico_predictions2) + (p))
-```
-
-```{r}
-mapview::mapview(st_jitter(errors |> arrange(error_abs), 1000), zcol = 'error_abs')
-```
-
-```{r}
-ggplot() +
-  geom_sf(data = arrange(errors, abs(error)), aes(color = abs(error))) +
-  scale_color_viridis_c()
-```
-
-```{r}
-ggplot() +
-  #geom_sf(data = mexico, fill = 'black', color = NA) +
-  geom_stars(data = mexico_predictions2 |> setNames('Sr')) +
-  geom_sf(data = mexico, fill = NA, linewidth = .1, color = 'white') +
-  #  geom_sf(data = mexico, fill = NA, color = 'white') +
-  coord_sf(expand = FALSE) +
-  scale_fill_viridis_c(option = 'magma', na.value = NA, 
-             #limits = c(0.7033230, 0.7221751)
-             ) +
-  geom_sf(data = errors, aes(color = error)) +
-  theme_bw() +
-  theme(
-    panel.background = element_rect(fill = "lightblue"),
-    panel.grid.major = element_line(color = "white", linewidth = 0.5),
-        plot.margin = margin(0, 0, 0, 0)
-  ) +
-  labs(x = '', y = '') + 
-  ggspatial::annotation_scale(location = "bl", width_hint = 0.2) +
-  ggspatial::annotation_north_arrow(
-    location = "bl", 
-    which_north = "true",
-    pad_x = unit(0.2, "in"), 
-    pad_y = unit(0.2, "in"),
-    style = ggspatial::north_arrow_fancy_orienteering
-  )
-```
