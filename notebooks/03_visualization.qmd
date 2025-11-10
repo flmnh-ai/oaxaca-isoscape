@@ -27,7 +27,6 @@ bart_final <- readRDS(here('outputs/models/bart_final.rds')) |>
   unbundle()
 ```
 
-
 ```{r}
 set.seed(42)
 mexico_predictions <- predict(mexico_predictors, 
@@ -96,8 +95,6 @@ ggplot() +
   theme_bw()
 ```
 
-
-
 n.threads isn't argument to internal bart predict function
 
 ```{r}
@@ -112,7 +109,6 @@ mexico_confidence <- predict(mexico_predictors, bart_final, type = 'conf_int',
 plot(mexico_confidence, downsample = 0)
 plot(mexico_confidence[,,,2, drop = TRUE] - mexico_confidence[,,,1, drop = TRUE], downsample = 0)
 ```
-
 
 Final predictions all together.
 
@@ -130,7 +126,6 @@ ggplot() +
   facet_wrap(~attributes) +
   theme_bw()
 ```
-
 
 ```{r}
 #mexico <- ne_countries(scale = 'medium') |>
@@ -306,11 +301,6 @@ ggplot() +
 ggsave(here('outputs/figures/oaxaca_isoscape_bart_v5.png'), width = 10, height = 6.4)
 ```
 
-
-
-
-
-
 ## Origin Assignment Monte Alban
 
 ```{r}
@@ -330,46 +320,19 @@ montealban <- test |>
 predict_bart <- getS3method("predict", "bart", envir = asNamespace("dbarts"))
 library(dbarts)
 
+set.seed(42)
 predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
   inverse_logit_transform() |>
   as_tibble() |>
-    pivot_longer(everything()) |>
-  ggplot() +
-  geom_histogram(aes(value)) +
-  scale_y_continuous(labels=function(x)x/8000) +
- # geom_vline(xintercept = inverse_logit_transform(filter(test, type2 == 'Zapotec')$Sr), color = 'black') +
-#  geom_vline(xintercept = c(0.70664, 0.70699), color = 'red') +
-  labs(x = '87Sr/86Sr', y = 'Density') +
-  theme_bw()
+  pivot_longer(everything()) |>
+  ggplot(aes(x = value)) +
+    geom_histogram(aes(y = after_stat(density))) +
+    labs(x = expression(""^"87" * "Sr/" * ""^"86" * "Sr"), 
+         y = 'Density') +
+    theme_bw()
  
-ggsave(here('outputs/figures/montealban_density.png'), width = 6, height =5, bg = 'white')
-   geom_histogram(data = tibble(test = rnorm(1000, 0.70664, 0.0007)), aes(test), color = 'red', alpha = 0.5) +
-    geom_histogram(data = tibble(test = rnorm(1000, 0.70699, 0.0007)), aes(test), color = 'red', alpha = 0.5)
-
-predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
-  inverse_logit_transform() |>
-  as_tibble() |>
-    pivot_longer(everything()) |>
-  ggplot() +
-  geom_density(aes(value), fill = 'darkgrey') +
-  #geom_vline(xintercept = filter(test, type2 == 'Zapotec')$Sr |> inverse_logit_transform(), color = 'red') +
-  #geom_vline(xintercept = c(0.70664, 0.70699)) +
-  theme_bw() +
-  labs(x ='87Sr/86Sr', y = 'Density')
-
-predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
-  inverse_logit_transform() |>
-  as_tibble() |>
-  ggplot(aes(V1)) +
-  geom_histogram() +
-  geom_vline(xintercept = filter(test, type2 == 'Zapotec')$Sr |> inverse_logit_transform(), color = 'red')
-quantile(montealban$Sr |> inverse_logit_transform())
-
-predict(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
-  inverse_logit_transform() |>
-quantile(c(0.025, 0.05, 0.95, 0.975))
+ggsave(here('outputs/figures/montealban_density_v2.png'), width = 6, height =5, bg = 'white')
 ```
-
 
 ```{r}
 # Read and process the data (keeping your original data processing)
@@ -382,11 +345,11 @@ ma_samp <- readxl::read_excel(here('Monte_Alban_Test_Individuals.xlsx')) |>
          type = `Sample Type/Element`) |>
   # Remove the simulation step - work with raw analytical data
   distinct()  |> # Remove any duplicates from the unnesting
-  mutate(actual_se = sd * Sr, # convert % SE to actual SE
+  mutate(actual_se = sd / 100 * Sr, # convert % SE to actual SE
          type = factor(type, levels = c('femur', 'enamel'))) 
 
 
-# Get model prediction ranges (keeping your quantile approach)
+# Get model IQR prediction ranges
 set.seed(42)
 model_range <- predict_bart(extract_fit_engine(bart_final), montealban, type = 'ppd') |> 
   inverse_logit_transform() |>
@@ -409,19 +372,19 @@ ggplot(ma_samp, aes(x = burial_id, y = Sr, color = type)) +
   geom_hline(yintercept = model_range[3], linetype = 2, linewidth = 1, color = 'darkgrey') +
   
   # Add points for measured values
-  geom_point(size = 4, position = position_dodge(width = 0.3)) +
+  #geom_point(size = 1, position = position_dodge(width = 0.3)) +
   
   # Add error bars (±1 SE)
-  geom_errorbar(aes(ymin = Sr - actual_se, ymax = Sr + actual_se), 
+  geom_errorbar(aes(ymin = Sr - 2 * actual_se, ymax = Sr + 2 * actual_se), 
                 width = 0.2, 
                 position = position_dodge(width = 0.3),
                 linewidth = 1) +
   
   # Optional: Add error bars for ±2 SE as thinner lines
-  geom_errorbar(aes(ymin = Sr - 2*actual_se, ymax = Sr + 2*actual_se), 
-                width = 0.1, 
-                position = position_dodge(width = 0.3),
-                linewidth = 0.5, alpha = 0.6) +
+ # geom_errorbar(aes(ymin = Sr - 2*actual_se, ymax = Sr + 2*actual_se), 
+  #              width = 0.1, 
+   #             position = position_dodge(width = 0.3),
+    #            linewidth = 0.5, alpha = 0.6) +
   
   coord_flip() +
   scale_x_discrete(limits = rev) +
@@ -435,7 +398,6 @@ ggplot(ma_samp, aes(x = burial_id, y = Sr, color = type)) +
 
 ggsave(here('outputs/figures/montealban_locals_error_bars_2_se_v7.png'), width = 6, height = 4, bg = 'white')
 ```
-
 
 ```{r}
 library(philentropy)
