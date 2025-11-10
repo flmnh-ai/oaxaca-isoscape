@@ -59,8 +59,8 @@ Create geological map showing sampling localities and bedrock geology of the stu
 
 ```{r geological-data}
 # Load geological shapefiles
-bedrock1 <- read_sf(here('data/archive/G02042022203359X/Litologia_E14_9.shp'))
-bedrock2 <- read_sf(here('data/archive/J02042022204037E/Litologia_E14_12.shp'))
+bedrock1 <- read_sf(here('data/raw/G02042022203359X/Litologia_E14_9.shp'))
+bedrock2 <- read_sf(here('data/raw/J02042022204037E/Litologia_E14_12.shp'))
 
 # Create point locations
 oaxaca_city <- st_sf(
