@@ -49,6 +49,7 @@ sediment_tibble <- tibble(
 Some of the variables have slightly different origins and extents, so we need to process them step by step before combining them.
 
 ```{r}
+# can remove sediment, but should be careful about indices after
 vars1 <- rast(pred_files[c(4:7)])
 names(vars1) <- pred_names[c(4:7)]
 levels(vars1[[2]]) <- sediment_tibble
@@ -67,12 +68,11 @@ other_predictors <- predictors[[1:3]]
 Calculate the leading principal components of the bedrock predictors.
 
 ```{r}
+set.seed(42)
 bedrock_pcs <- prcomp(bedrock, scale. = TRUE, maxcell = 10000000, retx = FALSE)
 bedrock_pcs
 
-bedrock_pc_names <- c("bedrock_age_sr_gradient", 
-                      "bedrock_young_highSrVar"#, "bedrock_ageRange_SrContrast"
-                      )
+bedrock_pc_names <- c("bedrock_age_sr_gradient", "bedrock_young_highSrVar")
 ```
 
 ### Soil
@@ -91,13 +91,9 @@ soil_pcs <- prcomp(soils, scale. = TRUE, maxcell = 10000000, retx = FALSE)
 soil_pcs
 
 soil_pc_names <- c(
-  "soil_moisture_and_bulk_density",  # PC1: High phh2o and moderate bulk density; contrast with clay
-  "soil_clay_cec_gradient",          # PC2: Contrast between higher clay and lower cec
-  "soil_clay_cec_texture"#,           # PC3: Combined effect of clay and cec (texture), not limited to surface layers
-#  "soil_depth_dependent_bulk_density", # PC4: Reflects vertical differences in bulk density
- # "soil_chemical_mineral"#,           # PC5: Captures additional chemical/mineral variability
-#  "soil_soc_enrichment",             # PC6: Dominated by high organic carbon (SOC) enrichment
- # "soil_soc_contrast"                # PC7: Inverse SOC pattern relative to PC6, with additional clay/cec influence
+  "soil_moisture_and_bulk_density", # PC1: High phh2o and moderate bulk density; contrast with clay
+  "soil_clay_cec_gradient", # PC2: Contrast between higher clay and lower cec
+  "soil_clay_cec_texture"   # PC3: Combined effect of clay and cec (texture), not limited to surface layers
 )
 ```
 
@@ -129,13 +125,13 @@ climate_pcs <- prcomp(climate, scale. = TRUE, maxcell = 10000000, retx = FALSE)
 climate_pcs
 
 climate_pc_names <- c(
-  "climate_temp_dryness_gradient",      # PC1: Captures the overall temperature–dryness gradient.
-  "climate_moisture_precipitation",       # PC2: Represents the moisture and precipitation regime.
-  "climate_temperature_extremes",         # PC3: Reflects temperature extremes and seasonality.
-  "climate_seasonal_precipitation",       # PC4: Indicates seasonal precipitation patterns.
-  "climate_precipitation_intensity_timing", # PC5: Describes precipitation intensity and timing.
-  "climate_radiation_vs_wind_dryness",    # PC6: Contrasts radiation with wind and dryness.
-  "climate_subtle_moisture_regime"        # PC7: Captures subtle aspects of the moisture regime.
+  "climate_temp_dryness_gradient",  # PC1: Captures the overall temperature–dryness gradient
+  "climate_moisture_precipitation", # PC2: Represents the moisture and precipitation regime
+  "climate_temperature_extremes",   # PC3: Reflects temperature extremes and seasonality
+  "climate_seasonal_precipitation", # PC4: Indicates seasonal precipitation patterns
+  "climate_precipitation_intensity_timing", # PC5: Describes precipitation intensity and timing
+  "climate_radiation_vs_wind_dryness", # PC6: Contrasts radiation with wind and dryness.
+  "climate_subtle_moisture_regime" # PC7: Captures subtle aspects of the moisture regime.
 )
 ```
 
@@ -153,11 +149,11 @@ aerosol_pcs <- prcomp(aerosols, scale. = TRUE, maxcell = 10000000, retx = FALSE)
 aerosol_pcs
 
 aerosol_pc_names <- c(
-  "aerosol_carbonaceous_sulfate_abundance",     # Overall loading of carbon and sulfate species, representing total anthropogenic pollution
-  "aerosol_sea_salt_signature",                 # Distinguishes marine aerosols (sea salt) from other components
-  "aerosol_dust_concentration",                 # Represents mineral dust loading, likely from arid regions or long-range transport
-  "aerosol_dry_wet_sulfate_organic_contrast",   # Contrasts dry sulfate with wet organic carbon, indicating different processing pathways
-  "aerosol_dry_carbon_dominance"                # Highlights the importance of dry carbonaceous aerosols vs. wet components
+  "aerosol_carbonaceous_sulfate_abundance", # Overall loading of carbon and sulfate species, representing total anthropogenic pollution
+  "aerosol_sea_salt_signature", # Distinguishes marine aerosols (sea salt) from other components
+  "aerosol_dust_concentration", # Represents mineral dust loading, likely from arid regions or long-range transport
+  "aerosol_dry_wet_sulfate_organic_contrast", # Contrasts dry sulfate with wet organic carbon, indicating different processing pathways
+  "aerosol_dry_carbon_dominance" # Highlights the importance of dry carbonaceous aerosols vs. wet components
 )
 ```
 
@@ -183,35 +179,46 @@ fillNA <- function(x, method = 'mean') {
 Create the in-memory predictor rasters for Mexico and Central America
 
 ```{r}
-mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
-  st_transform(eck4) 
+albers <- '+proj=aea +lon_0=-96 +lat_1=16.5 +lat_2=21.5 +lat_0=19 +datum=WGS84 +units=m +no_defs'
+mexico_bbox_eck <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
+  st_as_sfc() |>
+  st_buffer(500000) |>
+  st_transform(eck4) |>
+  st_bbox()
 
-mexico_bedrock <- crop(bedrock, mexico_bbox) |>
+mexico_bbox <- st_bbox(c(xmin = -106, xmax = -87, ymin = 15, ymax = 23), crs = 4326) |>
+  st_transform(albers) 
+
+mexico_bedrock <- crop(bedrock, mexico_bbox_eck) |>
   fillNA(method = 'modal') |>
-  predict(bedrock_pcs, index = 1:2, cores = 4)
+  predict(bedrock_pcs, index = 1:2, cores = 4) |>
+  project(albers) |>
+  crop(mexico_bbox)
 names(mexico_bedrock) <- bedrock_pc_names
 
-mexico_other <- crop(other_predictors, mexico_bbox) |>
-  fillNA(method = 'modal')
+mexico_other <- crop(other_predictors, mexico_bbox_eck) |>
+  fillNA(method = 'modal') |>
+  project(albers) |>
+  crop(mexico_bbox)
 
 mexico_climate <- crop(climate, st_transform(mexico_bbox, 4326)) |> 
   predict(climate_pcs, index = 1:7, cores = 4) |>
-  project(mexico_other)
+  project(mexico_bedrock)
 names(mexico_climate) <- climate_pc_names
 
 mexico_soils <- crop(soils, st_transform(mexico_bbox, crs(soils))) |> 
   predict(soil_pcs, index = 1:3, cores = 4) |>
-  project(mexico_other) |>
+  project(mexico_bedrock) |>
   fillNA('mean')
 names(mexico_soils) <- soil_pc_names
 
 mexico_aerosols <- crop(aerosols, st_transform(mexico_bbox, 4326), snap = 'out') |> 
   predict(aerosol_pcs, index = 1:5, cores = 4) |>
-  project(mexico_other, method = 'cubicspline')
+  project(mexico_bedrock, method = 'cubicspline')
 names(mexico_aerosols) <- aerosol_pc_names
 
 mexico_elevation <- crop(elevation, st_transform(mexico_bbox, 4326)) |> 
-  project(mexico_other)
+  project(mexico_bedrock)
 
 # combine everything and mask out ocean pixels
 mexico_predictors <- c(mexico_bedrock, mexico_other, mexico_aerosols, mexico_climate, mexico_soils, mexico_elevation) %>%
@@ -226,12 +233,11 @@ plot(mexico_aerosols)
 plot(mexico_climate)
 plot(mexico_soils)
 plot(mexico_other)
-plot(mexico_fertilizer)
 ```
 
 ```{r}
 plot(mexico_predictors[[1:12]])
-plot(mexico_predictors[[13:24]])
+plot(mexico_predictors[[13:21]])
 ```
 
 Save the Mexico predictors to disk so we don't have to reprocess them each time.
@@ -314,31 +320,17 @@ pts <- bind_rows(pts1, pts2, water, humans) |>
 Now we'll load the Oaxaca isotope observations and remove any samples with Sr isotope ratios greater than 0.71 (to remove any outliers that might be due to contamination or other issues at the San Martin Tilcajete site). We'll also convert the data to a spatial object and transform it to the Eckert IV projection.
 
 ```{r}
-#oaxaca_plants <- read_excel(here('data/raw/OAX Sr Result Table.xlsx')) %>%
-#  st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
-#  st_transform(eck4) |>
-#  rename(elevation = `Elevation (masl)`,
-#         rooting_depth = `Plant Rooting Depth`) #|>
-  #filter(Locality != 'San Martin Tilcajete')
-#  filter(Sr < 0.71)
-
-ggplot(oaxaca_plants, aes(Locality, Sr)) +
-  geom_point()
-
 oaxaca_plants <- read_excel(here('data/raw/OAX Sr Result Table_Updated.xlsx'), sheet = 2) %>%
   slice_head(n = -5) |> # remove empty rows from end of spreadsheet
   st_as_sf(coords = c('UTM-E', 'UTM-N'), crs = 32614) |>
   st_transform(eck4) |>
   rename(Locality = Site, 
          elevation = `Elevation (masl)`,
-         rooting_depth = `Plant Rooting Depth`) #|>
-  #filter(Locality != 'San Martin Tilcajete')
-  filter(Sr < 0.71)
+         rooting_depth = `Plant Rooting Depth`) |>
+  filter(Locality != 'San Martin Tilcajete') # remove contaminated site
 
 
-plot(oaxaca_plants$Sr, oaxaca_plants2$Sr)
-
-ggplot(oaxaca_plants2, aes(Locality, Sr)) +
+ggplot(oaxaca_plants, aes(Locality, Sr)) +
   geom_point()
 
 pts_combined <- oaxaca_plants |>
@@ -368,9 +360,8 @@ elevation_extract <- terra::extract(elevation,
                                     st_transform(pts_combined, 4326), 
                                     ID = FALSE, 
                                     search_radius = 5000,
-                                    #  cell = TRUE,
                                     na.rm = TRUE) |>
-  select(elevation)#, cell)
+  select(elevation)
 
 extract_fun <- function(x, rast, crs = 4326){
   terra::extract(rast[[x]], st_transform(pts_combined, crs = crs), 
@@ -408,28 +399,8 @@ bedrock_extract <- map_dfc(1:nlyr(bedrock), extract_fun, bedrock, eck4) %>%
   as_tibble() |>
   setNames(bedrock_pc_names)
 
-other_predictors[['sediment']]  <- as.int(other_predictors[['sediment']]) #dunno why this is necessary!
+other_predictors[['sediment']]  <- as.int(other_predictors[['sediment']]) # not clear why this is necessary, but it is
 other_extract <-  map_dfc(1:nlyr(other_predictors), extract_fun, other_predictors, eck4) 
-
-#fertilizer_extract <- terra::extract(fertilizer, 
- #                                 st_transform(pts_combined, 4326), 
-  #                                ID = FALSE, 
-   #                               method = 'bicubic', 
-    #                              na.rm = TRUE)
-```
-
-```{r}
-plot(other_predictors['sediment'] |> crop(st_bbox(oaxaca_plants)))
-```
-
-```{r}
-mapview::mapview(dat, zcol = 'sediment')
-plot(mexico_predictors['sediment'])
-mapview::mapview(mexico_predictors['sediment']) + mapview::mapview(dat, zcol = 'sediment')
-
-mapview::mapview(mexico_other['basement_age'])
-
-plot()
 ```
 
 ```{r}
@@ -440,31 +411,10 @@ dat <- pts_combined |>
   bind_cols(elevation_extract) |> 
   bind_cols(other_extract) |>
   bind_cols(soils_extract) |>
- # bind_cols(fertilizer_extract) |>
-  #mutate(pyroclastic = st_intersects(pts_combined, gum_pyroclastic, sparse = FALSE)[,1]
-#) |>
   mutate(type = factor(type)) |>
   mutate(elevation = as.numeric(elevation)) |>
   mutate(sediment = factor(sediment, labels = sediment_tibble$category[1:10])) |>
   select(-geometry) # hack to move to last column
-  # group_by(cell) %>%
-  # mutate(
-  #   n_points = n(),
-  #   median_sr = median(Sr, na.rm = TRUE),
-  #   mad_sr = median(abs(Sr - median_sr), na.rm = TRUE),
-  #   # Only calculate thresholds and flag outliers if enough points
-  #   threshold = if_else(n_points >= 5,
-  #     case_when(
-  #       median_sr < 0.710 ~ min(3 * mad_sr, 0.0008),
-  #       TRUE ~ min(3 * mad_sr, 0.0036)
-  #     ),
-  #     NA_real_
-  #   ),
-  #   is_outlier = if_else(!is.na(threshold), abs(Sr - median_sr) > threshold, FALSE)
-  # ) %>%
-  # ungroup() |>
-  # select(-c(n_points, median_sr, mad_sr, threshold, cell))
-#select(-cell)
 ```
 
 ### Spatial binning
